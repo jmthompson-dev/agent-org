@@ -16,7 +16,7 @@ claude plugin install agent-org@agent-org
 - **14 agents** (`agent-org:<id>`), each one a verbatim persona pinned to an `agent-personas` commit, plus a short Claude Code runtime binding. Every model is pinned (Opus for the PM, solutions, AI/ML research and InfoSec architects; Sonnet for the rest). No agent has the `Agent` tool, so nothing nests.
 - **`deliver` skill**: the only skill Claude loads on its own. PM writes an intent → you approve → the main thread dispatches the assigned specialists → validation → report.
 - **User-only skills:** `/agent-org:pm <task>`, `/agent-org:architecture-review <scope>`, `/agent-org:security-audit <scope>`, `/agent-org:release-validation <candidate>`.
-- **Hooks:** a `SessionStart` rule card with the levels, and a `UserPromptSubmit` nudge that fires when a prompt mentions a hard trigger (auth, secrets, data, infra, delivery, cross-service).
+- **Hooks:** a `SessionStart` rule card with the levels, a `UserPromptSubmit` nudge that fires when a prompt mentions a hard trigger (auth, secrets, data, infra, delivery, cross-service, change), and a `PreToolUse` guard (see Enforcement).
 
 ## Levels
 
@@ -39,7 +39,11 @@ Saved to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md` (`<repo>` = git to
 
 ## Debug logging
 
-Set `AGENT_ORG_HOOK_DEBUG=1` to append one JSON line per prompt to `~/.claude/agent-org/hook-debug.jsonl`: timestamp, the hook payload's top-level key names, prompt length and matched groups. Prompt text is never logged.
+Set `AGENT_ORG_HOOK_DEBUG=1` to append JSON lines to `~/.claude/agent-org/hook-debug.jsonl`:
+- the prompt hook: timestamp, the payload's top-level key names, prompt length, matched groups, and whether it was a background-agent notification;
+- the guard (`"hook":"guard"`): timestamp, tool name, `agent_type` if present, decision (`ask`/`deny`/`none`) and the matched rule name.
+
+Prompt text, commands and file paths are never logged.
 
 ## Persona sync (maintainers)
 
@@ -52,9 +56,19 @@ node scripts/sync-personas.mjs --bump <sha>       # rewrite only canonical block
 
 `--personas <path>` overrides the default `~/git/agent-personas`. The script never fetches or modifies the persona repo.
 
+## Enforcement
+
+**Enforced by the `PreToolUse` guard** (`hooks/guard.mjs`). It only ever returns `ask` or `deny`, never `allow`, and fails open:
+- **Risky shell commands → ask.** Bash and PowerShell commands are split on `&&`, `||`, `;`, `|`, `&`, `$(…)` and backticks, and normalized (env assignments, `sudo`/`timeout`/`env`-style wrappers, absolute executable paths, `git -C`/`--git-dir`, `sh -c`, `eval`, `pwsh -Command`/`-EncodedCommand`). Any segment matching git `commit`/`push`/`merge`/`rebase`/`reset --hard`/`clean`/`tag`/`branch -D`, `gh pr create|merge`, `gh release create`, `gh repo delete`, kubectl/helm/terraform mutations, gcloud/aws/az create/delete/update/deploy, `cf push|delete`, `rm -r` or `Remove-Item -Recurse` asks first, naming the pattern.
+- **QA edits only tests.** `Edit`/`Write` calls from `agent-org:quality-assurance-architect` are denied unless the path is a test path (`test/`, `tests/`, `__tests__/`, `spec/`, `specs/`, `fixtures/`, `testdata/`, `src/test/`, `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.*`). QA reports the needed change instead.
+
+**Recommended in your user `settings.json`** (plugins can't ship permission rules): `permissions.ask` rules for the same commands, e.g. `Bash(git push *)`, `PowerShell(git push *)`, and `permissions.allow` `Edit(~/.agent-org/intents/**)` so intent files save without a prompt. Use `Edit(…)`: `Write(path)` rules are accepted but never match. Never a bare `Write` or `Edit`. The rules are the primary layer; the guard catches the spellings they miss (`git -C . push`, `/usr/bin/git push`, `sh -c '…'`).
+
+In non-interactive runs (`claude -p`) an `ask` has no one to answer it, so the call is denied.
+
 ## Known enforcement gaps
 
-- **The approval gate is instruction-only.** Nothing technically stops implementation before you approve.
-- **Tool lists are enforced; everything finer is not.** QA has `Edit`/`Write` for tests, but nothing stops an application-code edit. InfoSec and Product `Write` are meant for test artifacts only. Engineers' "no deploy, no push" rules rely on the agent and on your permission rules.
-- **Plugins can't ship permission rules.** Ask rules for push, deploy and similar actions belong in your user `settings.json`.
-- **The hook is a nudge, not a gate**, and it also fires on non-user prompts (background-agent reports, cross-session messages). Prompts that never mention a trigger rely on the rule card and the model's judgment.
+- **The approval gate and blocking questions are instruction-only.** Nothing technically stops implementation before you approve.
+- **QA can still change application code through Bash** (`sed -i`, redirects). The guard scopes only its `Edit`/`Write`. Other agents' "no deploy, no push" rules rely on the ask rules and the guard, and InfoSec/Product `Write` "for test artifacts only" is instruction-only.
+- **The guard reads command text.** It can't see git aliases, scripts or Makefiles that run git themselves, or commands built from variables (`$CMD push`). A quoted mention such as `echo "git push"` is correctly not treated as a command.
+- **The prompt hook is a nudge, not a gate.** Prompts that never mention a trigger rely on the rule card and the model's judgment.

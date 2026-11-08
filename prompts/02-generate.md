@@ -42,6 +42,7 @@ plugin/
 │   ├── hooks.json
 │   ├── escalate.mjs
 │   ├── session-start.mjs
+│   ├── guard.mjs
 │   └── rule-card.md
 └── README.md
 scripts/sync-personas.mjs                 # repo-level, not shipped in the plugin
@@ -104,6 +105,7 @@ model: <see table>
 - The tools actually granted, and what is **enforced** (the tool list) versus **instruction-only** (e.g. "only write tests" when `Write` is granted). Be honest about the gaps.
 - You report to the main thread. You never spawn agents.
 - Expect a task contract: objective, target revision, constraints, allowed actions, deliverables, test expectations, stop conditions. If one is missing, ask instead of guessing.
+- QA: state that `Edit`/`Write` outside test paths are **denied by the guard** (report needed changes as findings), and that Bash is not path-scoped and must not be used to change application code.
 - Return format: outcome (PASS / FAIL / BLOCKED / SKIPPED / NOT RUN), evidence (commands run, output), changed files, findings in the canonical finding format, open questions. Never claim a test, review or approval that didn't happen.
 - **PM only:** you don't write files. Return the intent document as markdown for the main thread to save. Set the level using D5; triggers set the floor (D4). Pick only the specialists whose triggers fired, by exact `agent-org:<id>` from the roster the main thread sends; never invent an id. Mark every open question `[BLOCKING]` (no default, no recommendation) or `[NON-BLOCKING]` with a stated default; if you'd recommend an answer, it's non-blocking (D6). Mark independent tasks as parallelizable. Default to ordinary subagents; don't plan around agent teams (D7).
 
@@ -154,6 +156,7 @@ model: <see table>
 **`hooks.json`:** use the verified plugin format with paths through `"${CLAUDE_PLUGIN_ROOT}"`.
 - `UserPromptSubmit` → `escalate.mjs`, timeout 5s.
 - `SessionStart` → `session-start.mjs`, timeout 5s.
+- `PreToolUse` with matcher `Bash|PowerShell|Edit|Write` → `guard.mjs`, timeout 5s.
 
 **`escalate.mjs`:**
 - Read the hook JSON from stdin and take the prompt text.
@@ -167,6 +170,27 @@ model: <see table>
 - The script prints `rule-card.md` as session context and fails open.
 - The rule card is **no more than ~150 words**: the D5 level table compressed, with Level 1 written as an instruction tied to the tool call ("Your first Edit or Write must come after a message containing a line starting 'Plan:'. After editing, run the repo's test command if it has one and report the result."), "Levels 0–1: just do it. Level 2+: load `agent-org:deliver`; nothing is implemented without an approved intent", and that the main thread dispatches specialists.
 
+**`guard.mjs`** (D12) — the `PreToolUse` command and QA-scope guard:
+- Output schema (verified, https://code.claude.com/docs/en/hooks#pretooluse-decision-control): `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"|"deny","permissionDecisionReason":"…"}}`. For `ask` the reason is shown to the user in the prompt (and to Claude when `-p` auto-denies it); for `deny` it is shown to Claude. Deny and ask rules in settings are evaluated regardless of what the hook returns.
+- It returns **only** `ask` or `deny`, **never** `allow`, so it can't loosen anything. No decision → no output.
+- Dependency-free, cross-platform, **fail-open**: an error, malformed JSON or an unknown payload means no output and exit 0. The user's ask rules in `settings.json` stay the primary layer.
+- **Bash and PowerShell:** read `tool_input.command`.
+  - Split into segments on `&&`, `||`, `;`, `|`, `|&`, `&`, newlines and `( )`. Analyze the contents of `$(…)` and backticks as separate command lines, including inside double quotes. Honor single and double quotes (a quoted string is one word), and backslash escapes for Bash only (PowerShell paths keep their backslashes). `2>&1`-style redirections are not separators.
+  - Normalize each segment: strip leading `VAR=value` assignments, shell keywords (`do`, `then`, `{`, `!` …) and leading redirections; strip the wrappers `env`, `sudo`/`doas`, `timeout`, `nice`, `nohup`, `time`, `noglob`, `stdbuf`, `exec`, `command`/`builtin` (but `command -v`/`-V` is a lookup and doesn't match) and `xargs` (with its options); reduce the executable to its lower-case basename without `.exe`/`.cmd`/`.bat`/`.ps1` (`/usr/bin/git` → `git`).
+  - Unwrap and analyze recursively: `sh|bash|zsh|dash|ksh|fish -c '…'` (including combined flags like `-lc`), `eval …`, `pwsh|powershell -Command …` (any unambiguous prefix of `-Command`) and `-EncodedCommand <base64 UTF-16LE>`.
+  - Match against the ask list, which mirrors the user's Part A ask rules:
+    - **git:** skip global options (`-C`, `-c`, `--git-dir`, `--work-tree`, `--namespace`, `--super-prefix`, `--config-env`, `--exec-path` take a value, also as `--opt=value`), so `git -C . push` and `git --git-dir=… push` reduce to `git push`. Then the subcommand: `commit`, `push`, `merge`, `rebase`, `clean`, `tag`; `reset` with `--hard`; `branch` with `-D` (or `--delete`/`-d` plus `--force`/`-f`).
+    - **gh:** the first two non-option words (skipping `-R/--repo <value>`) are `pr create`, `pr merge`, `release create` or `repo delete`.
+    - **kubectl** `apply|edit|patch|delete|scale|rollout`, **helm** `install|upgrade|uninstall|rollback`, **terraform/tofu** `apply|destroy|import`, **gcloud** `create|delete|update|deploy`, **az** `create|delete|update`, **cf** `push|delete`: the verb appears as **any** non-option word, so global flags before it (`kubectl -n x apply`, `terraform -chdir=x apply`) can't hide it. False positives on a resource literally named like a verb are accepted.
+    - **aws:** any non-option word starting with `create`, `delete`, `update` or `put`, or equal to `deploy`.
+    - **rm:** any option before `--` containing `r`/`R`, or `--recursive`.
+    - **PowerShell `Remove-Item`** and its aliases `ri`, `del`, `erase`, `rd` with `-Recurse` or any prefix of it (`-r`), case-insensitive.
+  - Check **every** segment and collect **every** distinct matched pattern (not just the first), so a compound command such as `git add -A && git commit -m x && git -C . push` reports `git commit; git push`. On any match, return `ask` with a reason that names them: "agent-org guard: this command matches the ask list (<pattern>; <pattern>). Confirm before it runs." The debug log's `rule` carries the same joined list.
+  - A quoted mention isn't a command: `echo "git push"` produces no decision. Known limits (documented in the README): git aliases, scripts and Makefiles that run git internally, and variable-built commands (`$CMD push`).
+- **Edit and Write by `agent_type == "agent-org:quality-assurance-architect"`** (the field is present only on subagent tool calls; verified in Phase 3 §6): allow only test paths. Normalize `\` to `/` and resolve `..`; judge paths inside `cwd` relative to it (so a parent folder named `test` doesn't count). A test path has a directory segment `test`, `tests`, `__tests__`, `spec`, `specs`, `fixtures` or `testdata` (case-insensitive; covers Java `src/test/`), or a file name `*.test.*`, `*.spec.*`, `*_test.*` or `test_*.*`. Anything else → `deny`, reason: "agent-org guard: quality-assurance-architect may only edit test files (…). Do not make this change; report it to the main thread as a finding instead." Other agents and the main thread get no decision.
+- **Never log tool inputs** (no commands, no paths). With `AGENT_ORG_HOOK_DEBUG=1`, append to the same file as `escalate.mjs` (`~/.claude/agent-org/hook-debug.jsonl`) one line per call: `ts`, `hook: "guard"`, `tool`, `agent_type` if present, `decision` (`ask`/`deny`/`none`) and `rule` (the matched pattern, `qa-test-paths-only`, or null).
+- Export `analyzeCommand`, `isTestPath` and `decide` for testing, and run `main()` only when executed directly.
+
 ### 6. `scripts/sync-personas.mjs`
 Node, dependency-free, cross-platform. It never fetches, pulls or modifies `agent-personas`.
 - `--check` (the default): for each agent, compare the canonical block with `git show <pinned commit>:agents/<id>.md`. Report `OK`, `DRIFT`, `MISSING` or `NEW`. Also report whether the persona repo's `production` HEAD is ahead of the pin.
@@ -175,7 +199,7 @@ Node, dependency-free, cross-platform. It never fetches, pulls or modifies `agen
 - The persona repo path defaults to `~/git/agent-personas` and can be overridden with `--personas <path>`.
 
 ### 7. `plugin/README.md`
-Cover install (`claude plugin marketplace add <repo path or URL>`, then `claude plugin install agent-org@agent-org`), what the plugin does, the levels, intent files, how to force escalation, debug logging, persona sync, and the known enforcement gaps. Keep it short.
+Cover install (`claude plugin marketplace add <repo path or URL>`, then `claude plugin install agent-org@agent-org`), what the plugin does, the levels, intent files, how to force escalation, debug logging (both hooks), persona sync, and an **enforcement** section: what the guard enforces (ask on the normalized command list; QA limited to test paths), that it never allows anything, that the recommended user ask rules live in `settings.json` because plugins can't ship them, and the remaining gaps (approval gate and blocking questions are instruction-only; QA can still write through Bash; the guard can't see git aliases, scripts or variable-built commands; headless `ask` means the call is denied). Keep it short.
 
 ## Verification (read-only, no installs)
 
@@ -193,9 +217,36 @@ Cover install (`claude plugin marketplace add <repo path or URL>`, then `claude 
    - `"<task-notification> auth migration deploy done"` → no output
    - malformed JSON → exit 0, no output
 4. Run `session-start.mjs` and confirm it prints the rule card.
-5. Check the skill frontmatter: `deliver` is the only skill **without** `disable-model-invocation: true`; the other four have it.
-6. Check the frontmatter: every agent has `name`, `description`, `tools` and `model`, with no `inherit` and no `Agent`.
-7. `grep` everything you generated for absolute home paths, bucket IDs and the words `secret=` / `token=`. There should be no hits.
+5. Pipe payloads to `guard.mjs` (`cwd` `/work/app`; paths below are relative to it) and check the decision:
+
+   | Payload | Expected |
+   |---|---|
+   | Bash `git status` | no output |
+   | Bash `git push origin main` | ask |
+   | Bash `git -C . push` | ask |
+   | Bash `/usr/bin/git push` | ask |
+   | Bash `npm test && git push` | ask |
+   | Bash `git add -A && git commit -m x && git -C . push` | ask, naming `git commit; git push` |
+   | Bash `sh -c 'git push'` | ask |
+   | Bash `FOO=1 kubectl apply -f x.yaml` | ask |
+   | Bash `echo "git push"` | no output (a quoted mention, not a command; a false positive would be acceptable, a miss isn't) |
+   | Bash `rm -rf build` | ask |
+   | Bash `echo "$(git push)"`, `bash -lc "cd x; git push"`, `terraform -chdir=infra apply`, `kubectl -n prod rollout restart deploy/x`, `gh -R o/r pr merge 1` | ask |
+   | Bash `git log --grep push`, `git branch -d old`, `rm file.txt`, `npm test 2>&1 \| tail -5`, `command -v git` | no output |
+   | PowerShell `& "C:\Program Files\Git\cmd\git.exe" push`, `ri build -r`, `pwsh -Command "git push"` | ask |
+   | Edit `src/greet.js`, no `agent_type` | no output |
+   | Edit `src/greet.js`, `agent_type` QA | deny |
+   | Edit `test/greet.test.js`, `agent_type` QA | no output |
+   | Edit `src/test/java/FooTest.java`, `agent_type` QA | no output |
+   | Write `test/../src/greet.js`, `agent_type` QA | deny |
+   | Edit `src/a.js` with `cwd` `/home/test/app`, `agent_type` QA | deny |
+   | Write `src/greet.js`, `agent_type` full-stack-developer | no output |
+   | malformed JSON, empty stdin | no output, exit 0 |
+
+   With `AGENT_ORG_HOOK_DEBUG=1` and a throwaway `HOME`, confirm the log lines contain no command text or file paths.
+6. Check the skill frontmatter: `deliver` is the only skill **without** `disable-model-invocation: true`; the other four have it.
+7. Check the frontmatter: every agent has `name`, `description`, `tools` and `model`, with no `inherit` and no `Agent`.
+8. `grep` everything you generated for absolute home paths, bucket IDs and the words `secret=` / `token=`. There should be no hits.
 
 ## Report
 

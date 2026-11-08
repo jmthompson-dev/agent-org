@@ -1,5 +1,5 @@
 {
-  "description": "agent-org: escalation nudge on user prompts and a level rule card at session start",
+  "description": "agent-org: escalation nudge on user prompts, a level rule card at session start, and a PreToolUse command and QA-scope guard",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -18,6 +18,18 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.mjs\"",
             "timeout": 5
           }
         ]
