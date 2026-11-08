@@ -33,7 +33,10 @@ plugin/
 ├── agents/<id>.md                        # 14 files
 ├── skills/
 │   ├── deliver/SKILL.md
-│   └── pm/SKILL.md
+│   ├── pm/SKILL.md
+│   ├── architecture-review/SKILL.md
+│   ├── security-audit/SKILL.md
+│   └── release-validation/SKILL.md
 ├── hooks/
 │   ├── hooks.json
 │   ├── escalate.mjs
@@ -43,6 +46,8 @@ plugin/
 scripts/sync-personas.mjs                 # repo-level, not shipped in the plugin
 ```
 **No `plugin/settings.json`** (D1). **No `commands/`, `rules/` or plugin `CLAUDE.md`** (D13, D14). Remove `plugin/.gitkeep`.
+
+`marketplace.json` lives at the repo root, not inside `plugin/`.
 
 ### 1. `plugin.json`
 - `name: agent-org`, `version: 0.1.0`, a one-line `description`, and `author`.
@@ -116,6 +121,32 @@ model: <see table>
 
 **`skills/pm/SKILL.md`** — `disable-model-invocation: true`. The user forces escalation with `/agent-org:pm <task>`. It runs the `deliver` workflow from step 2 for `$ARGUMENTS` at Level 2 or higher.
 
+
+**Shared rules for the three workflow skills below:**
+- Each is a **main-thread** workflow that dispatches agent-org specialists with task contracts. The specialists never dispatch each other (D2).
+- All three are **user-only** (`disable-model-invocation: true`). `deliver` is the only skill the model can invoke (D14). Inside `deliver`, the PM assigns architects and InfoSec, so these skills are only for standalone reviews you start yourself.
+- Keep each description to one sentence that names its agent-org specialists.
+- If the work would change code, config or infra, it goes through `deliver` and an approved intent first. These skills review and validate; they don't implement.
+- Findings use the canonical format with stable IDs (`ARCH-###`, `SEC-###`, `QA-###`, `PROD-###`), numbered within the review or intent. Never invent a review, test or approval.
+
+**`skills/architecture-review/SKILL.md`** — `disable-model-invocation: true`. Run with `/agent-org:architecture-review <scope>`.
+1. Pick **only** the relevant architects: solutions for system and service boundaries, data-knowledge for data models, stores and pipelines, ai-ml-research for model and AI design, information-security when trust boundaries change. State why each one is included.
+2. Each returns the smallest viable design, at least one credible alternative, tradeoffs, risks and a recommendation. Run them in parallel when they're independent.
+3. The main thread synthesizes, and surfaces disagreements instead of averaging them away.
+4. Output is a recommendation for the human to decide on. **It never approves itself.** If an intent exists, attach the review to it.
+
+**`skills/security-audit/SKILL.md`** — `disable-model-invocation: true`. Run with `/agent-org:security-audit <scope>`.
+1. **Authorization and scope first:** what's in scope, which repo and revision, which tests are allowed. No live or production testing without explicit permission. If scope is unclear, stop and ask.
+2. Dispatch `information-security-architect` for threat analysis, then justified checks: static review, dependency, secret, configuration and container scanning, and bounded live tests only if authorized. Every check is justified by a threat.
+3. Report `SEC-###` findings with severity and evidence. After remediation, run a retest and record its result.
+4. **It never accepts risk.** Risk acceptance belongs to a named human and is recorded as theirs.
+
+**`skills/release-validation/SKILL.md`** — `disable-model-invocation: true`. The user runs `/agent-org:release-validation <candidate>`.
+1. Pin the candidate: exact commit, tag or artifact digest. If it's ambiguous, stop.
+2. Collect dispositions independently: `quality-assurance-architect` (regression and release tests), `technical-product-manager` (acceptance criteria), and `information-security-architect` (open `SEC` findings and release scan). Reuse existing evidence only if it's tied to the same candidate.
+3. Produce a checklist: each disposition PASS / FAIL / BLOCKED / NOT RUN with evidence, open findings, and the human approvals still needed, named by role.
+4. **It never deploys, tags, merges or publishes.** It stops at the checklist.
+
 ### 5. Hooks — Node, dependency-free, cross-platform (macOS, Linux, Windows)
 
 **`hooks.json`:** use the verified plugin format with paths through `"${CLAUDE_PLUGIN_ROOT}"`.
@@ -154,8 +185,9 @@ Cover install (`claude plugin marketplace add <repo path or URL>`, then `claude 
    - `"add a migration for users"` → nudge (data)
    - malformed JSON → exit 0, no output
 4. Run `session-start.mjs` and confirm it prints the rule card.
-5. Check the frontmatter: every agent has `name`, `description`, `tools` and `model`, with no `inherit` and no `Agent`.
-6. `grep` everything you generated for absolute home paths, bucket IDs and the words `secret=` / `token=`. There should be no hits.
+5. Check the skill frontmatter: `deliver` is the only skill **without** `disable-model-invocation: true`; the other four have it.
+6. Check the frontmatter: every agent has `name`, `description`, `tools` and `model`, with no `inherit` and no `Agent`.
+7. `grep` everything you generated for absolute home paths, bucket IDs and the words `secret=` / `token=`. There should be no hits.
 
 ## Report
 

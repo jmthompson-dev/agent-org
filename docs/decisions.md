@@ -67,8 +67,17 @@ Ask rules match command text only (`git -C . push` slips past `Bash(git push *)`
 ### D13. No rules or CLAUDE.md in the plugin — Verified
 A plugin's root `CLAUDE.md` isn't loaded. Orchestration policy lives in the `deliver` skill, the `SessionStart` rule card and the agents' runtime bindings.
 
-### D14. Skills, not commands; ship only what's needed — Decided
-v0.1 ships two skills: `deliver` (the model can invoke it; the full escalation workflow) and `pm` (user-only; forces escalation). The original spec's `architecture-review`, `security-audit` and `release-validation` skills are deferred until real use shows a need.
+### D14. One model-facing entry point; everything else is user-only — Decided
+`deliver` is the **only** skill Claude can invoke by itself, so every self-started piece of work goes through the PM, one set of level rules and one approval gate. Inside `deliver`, the PM already assigns architects and InfoSec when their triggers fire, so model-invocable review skills would be a second, competing route to the same work.
+| Skill | Invocation | Purpose |
+|---|---|---|
+| `deliver` | model + user | The escalation workflow: PM → intent → approval → dispatch → verify |
+| `pm` | user only | Force escalation: `/agent-org:pm <task>` |
+| `architecture-review` | user only | Standalone design review with only the relevant architects; recommends, never approves |
+| `security-audit` | user only | Standalone audit: scope check → threat analysis → justified scans → evidence → retest; never accepts risk |
+| `release-validation` | user only | Pin the candidate; collect QA, Product and InfoSec dispositions and human approvals; never deploys |
+
+All are main-thread workflows that dispatch agent-org specialists, which keeps D2 intact. User-only skills don't sit in Claude's context as matching candidates, so this also cuts always-loaded text. The `engineering` and `design` plugins, synced from claude.ai, duplicated the specialists and carried failing connectors. **Decided: disabled** at the claude.ai source, since a local-only disable may be re-synced. Phase 4 confirms they're gone with `claude plugin list`.
 
 ## Personas
 
