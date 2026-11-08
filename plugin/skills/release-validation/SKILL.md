@@ -22,7 +22,7 @@ You are the **main thread**. You pin the candidate, dispatch the three specialis
    - Each disposition (QA, Product, InfoSec): PASS / FAIL / BLOCKED / NOT RUN, with evidence (commands, results, revision).
    - Open findings by ID and severity.
    - **Human approvals still needed, named by role** (for example release owner, security risk owner, product owner). None are assumed.
-   If an intent exists under `~/.claude/intents/<repo>/`, attach the checklist to it.
+   If an intent exists under `~/.agent-org/intents/<repo>/`, attach the checklist to it.
 4. **It never deploys, tags, merges or publishes.** It stops at the checklist.
 
 Never invent a test run, acceptance or approval. A disposition that wasn't produced is NOT RUN.

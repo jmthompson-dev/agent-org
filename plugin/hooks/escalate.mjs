@@ -45,7 +45,7 @@ export function matchGroups(prompt) {
   return GROUPS.filter(([, re]) => re.test(prompt)).map(([name]) => name);
 }
 
-function debugLog(payload, prompt, groups) {
+function debugLog(payload, prompt, groups, isNotification = false) {
   if (process.env.AGENT_ORG_HOOK_DEBUG !== '1') return;
   try {
     fs.mkdirSync(path.dirname(DEBUG_FILE), { recursive: true });
@@ -54,6 +54,7 @@ function debugLog(payload, prompt, groups) {
       keys: payload && typeof payload === 'object' && !Array.isArray(payload) ? Object.keys(payload).sort() : [],
       promptLength: typeof prompt === 'string' ? prompt.length : null,
       groups,
+      notification: isNotification,
     };
     fs.appendFileSync(DEBUG_FILE, `${JSON.stringify(line)}\n`);
   } catch {
@@ -71,8 +72,11 @@ async function main() {
     return;
   }
   const prompt = payload && typeof payload.prompt === 'string' ? payload.prompt : '';
-  const groups = matchGroups(prompt);
-  debugLog(payload, prompt, groups);
+  // Background subagent reports arrive as <task-notification> prompts. They are not user
+  // requests, so they never get a nudge (Phase 3: they fired on every escalation).
+  const isNotification = prompt.trimStart().startsWith('<task-notification>');
+  const groups = isNotification ? [] : matchGroups(prompt);
+  debugLog(payload, prompt, groups, isNotification);
   if (groups.length === 0) return;
 
   const additionalContext =

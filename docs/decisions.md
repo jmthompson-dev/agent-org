@@ -17,7 +17,7 @@ On escalation, the main thread calls `agent-org:principal-project-manager`. The 
 - A short `SessionStart` rule card gives the main thread the level definitions in every session, so model judgment covers what the hook misses.
 - The hook fails open, has no dependencies, uses a short timeout and produces the same output however often it fires.
 - Trigger groups: auth, secrets, data, infra, delivery, change (dependencies, upgrades, breaking changes, public API). Bare `production`, `release`, `pipeline` and `token` are excluded: they fire on ordinary prompts, and a nudge that fires constantly gets ignored.
-- `UserPromptSubmit` also fires on background-agent reports and cross-session messages (Phase 1 §5e). v0.1 accepts the redundant nudge. When debug is on, the hook logs payload **key names** so Phase 3 can design a real filter from real payloads. **Open.**
+- `UserPromptSubmit` also fires on background-agent reports. Phase 3 showed this happens on **every** escalation: agents run in the background by default, and each report arrives as a prompt starting `<task-notification>`, with the same payload keys as a typed prompt. The hook skips those. **Verified** (Phase 3 §6). Cross-session messages weren't observed.
 
 ### D4. Hard triggers set the minimum level — Decided
 A trigger sets the floor. The PM can raise a level but never lower it below a trigger.
@@ -33,9 +33,13 @@ A trigger sets the floor. The PM can raise a level but never lower it below a tr
 Level 2 catches most real work, so the line between 1 and 2 is drawn by triggers to avoid both needless approval stops and risky changes slipping through.
 
 ### D6. Level 2+ work requires an approved intent file — Decided
-- The PM writes the content. The main thread saves it to `~/.claude/intents/<repo>/<YYYY-MM-DD>-<slug>.md` and creates the directory if it's missing.
+- The PM writes the content. The main thread saves it to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md` and creates the directory if it's missing.
+- **Not under `~/.claude`.** Claude Code treats every path there as a sensitive file and refuses agent writes even with explicit allow rules (Phase 3 F1). That protection is worth keeping.
+- **The save is a hard gate.** If it fails, the workflow stops: no implementation until the file exists or you explicitly waive it (Phase 3 F2).
+- **Open questions are `[BLOCKING]` or `[NON-BLOCKING]` with a stated default.** No approval request while a blocking question is open. "Approved" accepts the plan and the stated defaults, nothing more.
+- Specialists are named by exact `agent-org:<id>` in the intent, never by role.
 - **Nothing is implemented until you explicitly approve.** The approval is recorded in the file.
-- Not stored in the target repo, so application repos stay untouched. Not stored in session memory, because it would be lost on session end or compaction. Not stored in an OS cache folder, which can be wiped at any time. Not stored in `~/Library/Application Support`, because that path is macOS-only. `~/.claude` is Claude Code's own data folder on every OS.
+- Not stored in the target repo, so application repos stay untouched. Not stored in session memory, because it would be lost on session end or compaction. Not stored in an OS cache folder, which can be wiped at any time. Not stored in `~/Library/Application Support`, because that path is macOS-only. Not stored in `~/.claude`, which is write-protected for agents. `~/.agent-org` works on every OS.
 - `<repo>` is the basename of the git top level, or of the working directory outside git.
 - The approval gate is an **instruction, not enforcement**. Nothing technically stops a model from skipping it. That gap is documented, not hidden.
 
@@ -78,7 +82,7 @@ A plugin's root `CLAUDE.md` isn't loaded. Orchestration policy lives in the `del
 | `security-audit` | user only | Standalone audit: scope check → threat analysis → justified scans → evidence → retest; never accepts risk |
 | `release-validation` | user only | Pin the candidate; collect QA, Product and InfoSec dispositions and human approvals; never deploys |
 
-All are main-thread workflows that dispatch agent-org specialists, which keeps D2 intact. User-only skills don't sit in Claude's context as matching candidates, so this also cuts always-loaded text. The `engineering` and `design` plugins, synced from claude.ai, duplicated the specialists and carried failing connectors. **Decided: disabled** at the claude.ai source, since a local-only disable may be re-synced. Phase 3 confirms they're gone with `claude plugin list`.
+All are main-thread workflows that dispatch agent-org specialists, which keeps D2 intact. User-only skills don't sit in Claude's context as matching candidates, so this also cuts always-loaded text. The `engineering` and `design` plugins, synced from claude.ai, duplicated the specialists and carried failing connectors. **Decided: disabled** at the claude.ai source, since a local-only disable may be re-synced. Phase 3 confirmed they still appear in `claude plugin list` but are disabled.
 
 ## Personas
 
@@ -99,3 +103,12 @@ No secrets, tokens, absolute home paths, synced-bucket IDs or employer-specific 
 
 ### D18. Validate before permissions — Decided
 Phase 3 is live validation and Phase 4 is permissions. The permissions work depends on answers only a live run gives: whether `PreToolUse` input identifies the calling agent (which decides whether QA's `Edit` can be limited to test paths), and what real `UserPromptSubmit` payloads look like (for the hook filter).
+
+### D19. Background agents: wait for every report — Decided
+In this build, `Agent` calls run in the background by default and report back as notifications (Phase 3 §6). That's kept. `deliver` waits for **every** dispatched report before starting dependent tasks, setting `IMPLEMENTED` or verifying.
+
+### D20. Level 1 is an instruction, not a description — Decided
+Phase 3 (F3, 2/2 runs) showed "one-line plan, then do it with focused tests" gets skipped. The rule card now says: before the first edit, write one line starting "Plan:"; after editing, run the repo's test command if it has one and report the result.
+
+### D21. Install from a pinned remote; develop with `--plugin-dir` — Open
+Installed from the local folder, the plugin is read live from the working tree, so any edit or branch switch changes the running plugin (Phase 3 §2). That breaks the pinned-and-versioned promise of D15. Target: tag releases on `production` and install from GitHub, pinned to the tag; test development changes with `claude --plugin-dir ./plugin`. Phase 4 verifies whether marketplaces can pin a ref.

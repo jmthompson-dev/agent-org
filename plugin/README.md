@@ -31,7 +31,7 @@ A trigger sets the minimum level.
 
 ## Intent files
 
-Saved to `~/.claude/intents/<repo>/<YYYY-MM-DD>-<slug>.md` (`<repo>` = git top-level basename). They live outside your application repos. Status moves PROPOSED → APPROVED → IMPLEMENTED → VERIFIED, and approval is recorded in the file's approval log.
+Saved to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md` (`<repo>` = git top-level basename). They live outside your application repos and outside `~/.claude`, which Claude Code protects from agent writes. Status moves PROPOSED → APPROVED → IMPLEMENTED → VERIFIED, and approval is recorded in the file's approval log.
 
 ## Force escalation
 

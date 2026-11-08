@@ -100,24 +100,24 @@ model: <see table>
 - Specialists: "Dispatched from an approved agent-org intent." This discourages ad-hoc spawning at Levels 0–1.
 - The infra trio must use the D16 split, with the ownership tie-breakers spelled out.
 
-**Runtime binding** (under 200 words each; it complements the persona and never contradicts it):
+**Runtime binding** (under 200 words each, 250 for the PM; it complements the persona and never contradicts it):
 - The tools actually granted, and what is **enforced** (the tool list) versus **instruction-only** (e.g. "only write tests" when `Write` is granted). Be honest about the gaps.
 - You report to the main thread. You never spawn agents.
 - Expect a task contract: objective, target revision, constraints, allowed actions, deliverables, test expectations, stop conditions. If one is missing, ask instead of guessing.
 - Return format: outcome (PASS / FAIL / BLOCKED / SKIPPED / NOT RUN), evidence (commands run, output), changed files, findings in the canonical finding format, open questions. Never claim a test, review or approval that didn't happen.
-- **PM only:** you don't write files. Return the intent document as markdown for the main thread to save. Set the level using D5; triggers set the floor (D4). Pick only the specialists whose triggers fired. Mark independent tasks as parallelizable. Default to ordinary subagents; don't plan around agent teams (D7).
+- **PM only:** you don't write files. Return the intent document as markdown for the main thread to save. Set the level using D5; triggers set the floor (D4). Pick only the specialists whose triggers fired, and name each by its exact `agent-org:<id>`, never by role. Mark every open question `[BLOCKING]` or `[NON-BLOCKING]` with a stated default (D6). Mark independent tasks as parallelizable. Default to ordinary subagents; don't plan around agent teams (D7).
 
 ### 4. Skills
 
 **`skills/deliver/SKILL.md`** — model-invocable. This is the full escalation workflow for the main thread:
-1. Classify with D5. At Level 0–1, don't use this workflow: give a one-line "here's what I'll do", then do it.
+1. Classify with D5. At Level 0–1, don't use this workflow. At Level 1: write "Plan: …" before the first edit, and run the repo's test command afterward if it has one.
 2. Level 2+: invoke `agent-org:principal-project-manager` with the request, the repo, the branch and the relevant context.
-3. Save the returned intent to `~/.claude/intents/<repo>/<YYYY-MM-DD>-<slug>.md`, creating the directory if it doesn't exist. `<repo>` is the basename of the git top level, or of the working directory outside git.
-4. Show a short summary and the file path, then **stop and wait for explicit approval.** Silence, or a question, isn't approval.
-5. On approval, add `APPROVED <date>` to the intent's approval log, then dispatch the assigned specialists, each with its task contract. Run independent tasks in parallel.
+3. Save the returned intent to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md`, creating the directory if it doesn't exist. `<repo>` is the basename of the git top level, or of the working directory outside git. **If the save fails, stop:** explain why, show the intent in chat, and don't implement until it's saved or the user explicitly waives the file (D6).
+4. Ask the user any `[BLOCKING]` questions first and re-plan; never ask for approval while one is open. Then show a short summary (including non-blocking defaults) and the file path, and **stop and wait for explicit approval.** Silence, or a question, isn't approval. Approval accepts the plan and the stated non-blocking defaults only.
+5. On approval, add `APPROVED <date>` to the intent's approval log, then dispatch the assigned specialists, each with its task contract. Run independent tasks in parallel. Agents may run in the background and report as notifications; wait for **every** report before dependent tasks or verification.
 6. Collect results, run the validation the intent specifies, and update the intent's status (`IMPLEMENTED`, then `VERIFIED`) with evidence.
 7. Final report: outcome, evidence, and any open items. Stop if scope or risk grows, and go back to the PM to re-plan.
-- Embed the **intent template**: Title · Status (PROPOSED / APPROVED / IMPLEMENTED / VERIFIED) · Repo / branch / base commit · Level and the triggers hit · Goal · Non-goals · Acceptance criteria · Implementation plan (components, files, steps) · Specialist assignments (agent, task contract, dependencies, parallel or sequential) · Validation (tests; QA, InfoSec or Product only if triggered) · Risks and rollback · Open questions · Approval log.
+- Embed the **intent template**: Title · Status (PROPOSED / APPROVED / IMPLEMENTED / VERIFIED) · Repo / branch / base commit · Level and the triggers hit · Goal · Non-goals · Acceptance criteria · Implementation plan (components, files, steps) · Specialist assignments (agent as `agent-org:<id>`, mandatory; task contract; dependencies; parallel or sequential) · Validation (tests; QA, InfoSec or Product only if triggered) · Risks and rollback · Open questions (each `[BLOCKING]`, or `[NON-BLOCKING]` with a default) · Approval log.
 - Say plainly that the approval gate is instruction-only (D6).
 - The description must make it load on escalation, and say that agent-org specialists take priority over overlapping skills like `engineering:architecture` for Level 2+ work.
 
@@ -158,13 +158,14 @@ model: <see table>
 **`escalate.mjs`:**
 - Read the hook JSON from stdin and take the prompt text.
 - Match case-insensitively with word boundaries against named trigger groups, in this fixed order: auth (`authentication`, `authorization`, `oauth`, `sso`, `jwt`, `login`, standalone `auth`/`authn`/`authz`), secrets (`secret(s)`, `credential(s)`, `api key`, `password`), data (`migration`, `schema`, `alter table`, `ddl`), infra (`terraform`, `helm`, `kubernetes`, `k8s`, `kubectl`, `iam`, `infrastructure`), delivery (`ci/cd`, `github actions`, `deploy*`, `release to prod(uction)`, `prod(uction) deploy/release/rollout`), cross-service (`across services`, `multiple services`, `microservices`), change (`dependency`/`dependencies`, `upgrade*`, `breaking change(s)`, `public api`, `api contract(s)`). **Don't** match bare `token`, `author`, `release`, `production` or `pipeline`: they fire on ordinary prompts, and a nudge that fires constantly gets ignored.
+- If the prompt (after leading whitespace) starts with `<task-notification>`, it's a background subagent report, not a user request: **never nudge** (D3).
 - On a match, emit `additionalContext` with a nudge: which groups matched; "this may be Level 2+ — consider loading the `agent-org:deliver` skill; if it's clearly Level 0–1, proceed normally." The output must be the same however often the hook fires.
-- If `AGENT_ORG_HOOK_DEBUG=1`, append one line to `~/.claude/agent-org/hook-debug.jsonl` with a timestamp, the payload's **top-level key names**, prompt length and matched groups. **Never log prompt text.** Create the directory if needed.
+- If `AGENT_ORG_HOOK_DEBUG=1`, append one line to `~/.claude/agent-org/hook-debug.jsonl` with a timestamp, the payload's **top-level key names**, prompt length, matched groups and whether it was a task notification. **Never log prompt text.** Create the directory if needed.
 - Fail open: catch everything and always exit 0. A hook error must never block a prompt.
 
 **`session-start.mjs` and `rule-card.md`:**
 - The script prints `rule-card.md` as session context and fails open.
-- The rule card is **no more than ~150 words**: the D5 level table compressed, "Levels 0–1: just do it. Level 2+: load `agent-org:deliver`; nothing is implemented without an approved intent", and that the main thread dispatches specialists.
+- The rule card is **no more than ~150 words**: the D5 level table compressed, with Level 1 written as an instruction ("Before your first edit, write one line starting 'Plan:'. After editing, run the repo's test command if it has one and report the result."), "Levels 0–1: just do it. Level 2+: load `agent-org:deliver`; nothing is implemented without an approved intent", and that the main thread dispatches specialists.
 
 ### 6. `scripts/sync-personas.mjs`
 Node, dependency-free, cross-platform. It never fetches, pulls or modifies `agent-personas`.
@@ -189,6 +190,7 @@ Cover install (`claude plugin marketplace add <repo path or URL>`, then `claude 
    - `"production is down, check the logs"` → no output
    - `"upgrade spring boot to 4.1"` → nudge (change)
    - `"deploy to production"` → nudge (delivery)
+   - `"<task-notification> auth migration deploy done"` → no output
    - malformed JSON → exit 0, no output
 4. Run `session-start.mjs` and confirm it prints the rule card.
 5. Check the skill frontmatter: `deliver` is the only skill **without** `disable-model-invocation: true`; the other four have it.

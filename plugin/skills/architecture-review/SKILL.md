@@ -18,6 +18,6 @@ You are the **main thread**. You dispatch the architects and synthesize their ou
    - `agent-org:information-security-architect`: only when trust boundaries change.
 2. **Dispatch each one with a task contract** (objective, target revision, constraints, allowed actions = read-only review, deliverables, stop conditions). Each returns the smallest viable design, at least one credible alternative, tradeoffs, risks and a recommendation, with findings as `ARCH-###` (InfoSec uses `SEC-###`). Run independent reviews in parallel, in one message.
 3. **Synthesize.** Merge duplicate findings and renumber them within this review. **Surface disagreements explicitly** with each side's reasoning; don't average them away.
-4. **Output a recommendation for the human to decide on:** options, tradeoffs, recommended option, open findings, open questions. **It never approves itself.** If an intent exists for this work under `~/.claude/intents/<repo>/`, attach the review to it as a section. Don't change its status or approval log.
+4. **Output a recommendation for the human to decide on:** options, tradeoffs, recommended option, open findings, open questions. **It never approves itself.** If an intent exists for this work under `~/.agent-org/intents/<repo>/`, attach the review to it as a section. Don't change its status or approval log.
 
 Never invent a review, finding or approval. An architect that wasn't dispatched didn't review anything.
