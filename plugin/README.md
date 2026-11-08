@@ -70,5 +70,5 @@ In non-interactive runs (`claude -p`) an `ask` has no one to answer it, so the c
 
 - **The approval gate and blocking questions are instruction-only.** Nothing technically stops implementation before you approve.
 - **QA can still change application code through Bash** (`sed -i`, redirects). The guard scopes only its `Edit`/`Write`. Other agents' "no deploy, no push" rules rely on the ask rules and the guard, and InfoSec/Product `Write` "for test artifacts only" is instruction-only.
-- **The guard reads command text.** It can't see git aliases, scripts or Makefiles that run git themselves, or commands built from variables (`$CMD push`). A quoted mention such as `echo "git push"` is correctly not treated as a command.
+- **The guard reads command text.** It can't see git aliases, scripts or Makefiles that run git themselves, interpreter one-liners (`python -c "os.system(...)"`), or commands built from variables (`$CMD push`). A quoted mention such as `echo "git push"` is correctly not treated as a command.
 - **The prompt hook is a nudge, not a gate.** Prompts that never mention a trigger rely on the rule card and the model's judgment.

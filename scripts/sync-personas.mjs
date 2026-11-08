@@ -11,7 +11,7 @@
 //   DRIFT   block content or source= stamp differs from the pin
 //   MISSING agent file has no canonical block, or the persona does not exist at the pin
 //   NEW     persona exists at the pin but the plugin has no agent file for it
-//   Also reports whether the persona repo's local `main` ref (metadata.personasBranch) is ahead of the pin.
+//   Also reports whether the persona repo's local metadata.personasBranch ref and `production` ref are ahead of the pin.
 //   Exits 1 on any non-OK status.
 // --bump <sha>: rewrite only the canonical blocks, their source= stamps and
 //   plugin.json metadata.personasCommit. Frontmatter and runtime bindings are untouched.
@@ -167,16 +167,19 @@ function check(opts) {
     console.log(`${status.padEnd(8)}${id.padEnd(width + 2)}${note}`);
   }
 
-  const head = git(opts.personas, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`], {
-    allowFail: true,
-  });
-  if (!head) {
-    console.log(`${branch}: local branch not found (not fetched; this script never fetches)`);
-  } else {
+  // The pinned branch (metadata.personasBranch) plus `production`, the release branch, when they differ.
+  for (const b of [...new Set([branch, 'production'])]) {
+    const head = git(opts.personas, ['rev-parse', '--verify', '--quiet', `refs/heads/${b}^{commit}`], {
+      allowFail: true,
+    });
+    if (!head) {
+      console.log(`${b}: local branch not found (not fetched; this script never fetches)`);
+      continue;
+    }
     const ahead = Number(git(opts.personas, ['rev-list', '--count', `${pin}..${head.trim()}`]).trim());
     const behind = Number(git(opts.personas, ['rev-list', '--count', `${head.trim()}..${pin}`]).trim());
-    if (ahead === 0 && behind === 0) console.log(`${branch}: at pin`);
-    else console.log(`${branch}: ${ahead} commit(s) ahead of pin, ${behind} behind (local ref; not fetched)`);
+    if (ahead === 0 && behind === 0) console.log(`${b}: at pin`);
+    else console.log(`${b}: ${ahead} commit(s) ahead of pin, ${behind} behind (local ref; not fetched)`);
   }
 
   const bad = rows.filter((r) => r[1] !== 'OK').length;
