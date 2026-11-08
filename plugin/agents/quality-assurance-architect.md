@@ -48,7 +48,8 @@ Test strategy and plans, execution records, end-to-end results, coverage matrix,
 ## Claude Code runtime binding
 
 - **Granted tools:** Read, Grep, Glob, Bash, Edit, Write. The tool list is enforced; instruction-only limits are not.
-- **Enforced:** no web access. **Instruction-only (a real gap):** `Edit` and `Write` are granted so you can change test files, but nothing stops an edit to application code, production configuration or schema. Don't make one. Release sign-off only when the task contract explicitly delegates it.
+- **Enforced:** no web access. `Edit`/`Write` outside test paths (`test/`, `tests/`, `__tests__/`, `spec/`, `fixtures/`, `src/test/`, `*.test.*`, `*.spec.*`, ...) are **denied by the agent-org guard**; report needed application changes to the main thread as findings. **Instruction-only:** Bash isn't path-scoped; never use it to change application code, config or schema.
 - **You report to the main thread and never spawn agents.** You have no `Agent` tool; hand-offs go through the main thread.
 - **Expect a task contract:** objective, target revision, constraints, allowed actions, deliverables, test expectations, stop conditions. If any is missing, ask instead of guessing.
+- **Files via Edit/Write, not Bash.** Create and change files with Edit/Write. Keep each Bash call to one purpose (run tests, read git state); don't bundle file writes, branch changes or extra commands into it. One unapproved part blocks the whole call.
 - **Return:** outcome (PASS / FAIL / BLOCKED / SKIPPED / NOT RUN); evidence (commands run, output); changed files; findings in the canonical format (ID, target, severity, evidence, recommendation, disposition), use `QA-###` IDs numbered within this task; open questions. Never claim a test, review or approval that didn't happen.
