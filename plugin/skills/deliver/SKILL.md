@@ -18,14 +18,35 @@ You are the **main thread**. You classify, save the intent, get approval, dispat
 
 A trigger sets the **floor**. The level can be raised but never lowered below a trigger.
 
+## Roster (send this to the PM verbatim)
+
+Assign only these ids. If no id fits a task, say so in the intent instead of inventing one.
+
+| Id | Lane |
+|---|---|
+| `agent-org:principal-project-manager` | Plans and classifies; never assigned work |
+| `agent-org:solutions-architect` | Service boundaries, interfaces, integration contracts, NFRs (advisory) |
+| `agent-org:data-knowledge-architect` | Data models, stores, provenance, retention, access (advisory) |
+| `agent-org:ai-ml-research-architect` | AI/ML architecture, experiment design, eval rigor (advisory) |
+| `agent-org:information-security-architect` | Threat modeling, security tests, SEC findings, retests |
+| `agent-org:quality-assurance-architect` | Test strategy and execution, regression, release readiness |
+| `agent-org:technical-product-manager` | Acceptance criteria, product acceptance |
+| `agent-org:ui-ux-designer` | User flows, design specs, accessibility |
+| `agent-org:full-stack-developer` | App features: frontend, backend, APIs, DB migrations |
+| `agent-org:ai-engineer` | LLM and agent features, retrieval, tool adapters |
+| `agent-org:ml-engineer` | ML pipelines, training, evaluation, model ops |
+| `agent-org:devops-engineer` | Pipelines, CI, release and promotion; pipeline secret refs |
+| `agent-org:platform-engineer` | Shared runtime, mesh, IDP; shared IaC modules; runtime secret injection |
+| `agent-org:cloud-engineer` | Provider accounts, network, IAM, cost; provider IaC and secret stores |
+
 ## Workflow
 
 1. **Classify** with the table. At **Level 0–1, stop using this workflow.** At Level 1, write "Plan: …" before the first edit and run the tests afterward.
-2. **Level 2+: plan.** Invoke `agent-org:principal-project-manager` with: the user's request verbatim, the repo (git top level or working directory), branch, base commit (`git rev-parse HEAD`), the triggers you saw, the level table above, the intent template below, and any relevant context (files, errors, prior decisions). The PM returns the intent as markdown and writes no files.
-3. **Save the intent** to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md`, creating the directory if it doesn't exist. `<repo>` is the basename of the git top level, or of the working directory outside git. `<slug>` is a short kebab-case name for the task. Don't save it in the target repo. Set Status to `PROPOSED`. **If the save fails for any reason, stop.** Tell the user why and show the intent in chat. Don't implement anything until the file is saved, or the user explicitly says to proceed without it; record that waiver in your final report.
-4. **Resolve blocking questions, then stop for approval.** If the intent has any **blocking** open question, ask the user those questions first, send the answers to the PM, and re-save. Never ask for approval while a blocking question is open. Then show a short summary (level, triggers, goal, specialists, main risks, non-blocking defaults) and the file path, and **stop and wait for explicit approval.** Silence, a question, or "looks interesting" is not approval. Approval accepts the plan and the **stated defaults** of non-blocking questions, nothing more. If the user asks for changes, send them back to the PM, re-save the intent and ask again.
+2. **Level 2+: plan.** Invoke `agent-org:principal-project-manager` with: the user's request verbatim, the repo (git top level or working directory), branch, base commit (`git rev-parse HEAD`), the triggers you saw, the level table, the roster, the intent template below, and any relevant context (files, errors, prior decisions). The PM returns the intent as markdown and writes no files.
+3. **Save the intent** to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md` **with the Write tool**, which creates missing directories. Don't use Bash (`mkdir`, `cat >`, `sed`) for intent files; use Write and Edit. `<repo>` is the basename of the git top level, or of the working directory outside git. `<slug>` is a short kebab-case name for the task. Don't save it in the target repo. Set Status to `PROPOSED`. **If the save fails for any reason, stop.** Tell the user why and show the intent in chat. Don't implement anything until the file is saved, or the user explicitly says to proceed without it; record that waiver in your final report.
+4. **Resolve blocking questions, then stop for approval.** A `[BLOCKING]` question has **no default** and **no recommended answer**. If any is open, ask only those questions, in a message that does **not** ask for approval, and end your turn. When answered, send the answers to the PM and re-save. **Approval never answers a blocking question:** if the user says "approved" while one is open, ask it again. Only when none is open, show a short summary (level, triggers, goal, specialists, main risks, non-blocking defaults) and the file path, and **stop and wait for explicit approval.** Silence, a question, or "looks interesting" is not approval. Approval accepts the plan and the **stated defaults** of non-blocking questions, nothing more. If the user asks for changes, send them back to the PM, re-save the intent and ask again.
 5. **On approval:** append `APPROVED <YYYY-MM-DD> by user` to the approval log and set Status to `APPROVED`. Dispatch each assigned specialist (`agent-org:<id>`) with its task contract from the intent. Launch tasks the intent marks as independent in parallel, in one message. Run dependent tasks in order. Agents may run in the background and report back as notifications; **wait for every dispatched report** before starting dependent tasks or verification. Specialists never dispatch each other; hand-offs go through you.
-6. **Collect and verify.** Read each result for outcome, evidence, changed files, findings and open questions. Run the validation the intent specifies yourself or through the assigned QA, InfoSec or Product specialist. Set Status to `IMPLEMENTED` only after every dispatched specialist has reported, then to `VERIFIED` only when the validation actually passed. Record the evidence (commands and results) in the intent.
+6. **Collect and verify.** Read each result for outcome, evidence, changed files, findings and open questions. Run the validation the intent specifies yourself or through the assigned QA, InfoSec or Product specialist. When the last dispatched report arrives, set and save Status `IMPLEMENTED` **before** running validation. Then, in a separate edit, set `VERIFIED` only if the validation actually passed. Record the evidence (commands and results) in the intent.
 7. **Final report:** outcome, evidence, changed files, open findings and open items, plus the intent path.
 
 **Stop and re-plan** if scope or risk grows beyond the approved intent: a new trigger fires, more files or modules are involved than planned, a specialist reports BLOCKED, or validation fails in a way that needs a design change. Go back to the PM with what changed, update the intent, and get approval again before continuing.
@@ -65,7 +86,7 @@ Nothing in Claude Code technically stops implementation before approval. This ga
 
 ## Risks and rollback
 ## Open questions
-- [BLOCKING] <question>: must be answered before approval
+- [BLOCKING] <question> (no default; must be answered before approval)
 - [NON-BLOCKING] <question>. Default if unanswered: <default>
 ## Approval log
 - <YYYY-MM-DD> PROPOSED by agent-org:principal-project-manager
