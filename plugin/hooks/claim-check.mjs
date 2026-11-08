@@ -4,8 +4,9 @@
 //         current turn, and every cited file must have been opened this session. Relayed, quoted,
 //         negated and retracted sentences are skipped.
 //   SubagentStop: the report contract (first line `Outcome: …`; a PASS needs a successful command in the
-//         agent's own transcript), a scan for refused "modified since read" edits (collisions), and an
-//         audit `result` record.
+//         agent's own transcript), a scan for refused "modified since read" edits (collisions), an audit
+//         `result` record, and finished[agent_id] in the session state (for the guard's same-group fallback).
+//         The PM is exempt from the report contract: it returns an intent (audited with outcome `plan`).
 // Blocks once (stop_hook_active false); on the second stop it only warns. Fail-open, no content logged.
 
 import path from 'node:path';
@@ -14,7 +15,7 @@ import {
   filesOpenedInSession, finalAssistantText, isShell, readJsonl, refusedStaleEdits, subagentTranscripts,
   succeeded, toolCalls, toolCallsInTurn,
 } from './lib/transcript.mjs';
-import { appendLedger, readLedger, safeId } from './lib/state.mjs';
+import { appendLedger, readLedger, safeId, updateState } from './lib/state.mjs';
 import { repoName } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
 import { auditBase, parseOutcome } from './record.mjs';
@@ -22,8 +23,10 @@ import { auditBase, parseOutcome } from './record.mjs';
 // "decision" (verified, P5 A2) or "additionalContext" (docs-only softer form). Phase 6 decides.
 export const BLOCK_FORM = process.env.AGENT_ORG_BLOCK_FORM === 'additionalContext' ? 'additionalContext' : 'decision';
 
+// The PM returns an intent, not a report: exempt from the report contract ("PASS" on a plan means nothing).
+const PM = 'agent-org:principal-project-manager';
 // Agents with no shell tool: a PASS is backed by any successful tool call (they can't run commands).
-const NO_SHELL = new Set(['principal-project-manager', 'solutions-architect', 'ai-ml-research-architect',
+const NO_SHELL = new Set(['solutions-architect', 'ai-ml-research-architect',
   'data-knowledge-architect', 'ui-ux-designer'].map((id) => `agent-org:${id}`));
 
 // ---------------------------------------------------------------------------------------------
@@ -193,10 +196,13 @@ export function checkSubagentStop(payload) {
   const all = toolCalls(entries);
   const shell = all.filter(isShell);
   const commands = { run: shell.length, failed: shell.filter((c) => c.isError === true).length };
-  const outcome = parseOutcome(text);
+  const isPm = type === PM;
+  const outcome = isPm ? 'plan' : parseOutcome(text);
   const failures = [];
   const kinds = [];
-  if (!outcome) {
+  if (isPm) {
+    // Exempt from the report contract; still audited and scanned for collisions below.
+  } else if (!outcome) {
     failures.push('the report\'s first line must be "Outcome: PASS | FAIL | BLOCKED | SKIPPED | NOT RUN"');
     kinds.push('missing-outcome');
   } else if (outcome === 'PASS') {
@@ -208,6 +214,15 @@ export function checkSubagentStop(payload) {
   }
 
   const sid = payload.session_id;
+  // Finished agents' files are fair game for later sequential tasks (guard's same-group fallback).
+  // A stop this hook blocks isn't a finish: the agent keeps working, so it's recorded on its next stop.
+  const blocking = failures.length > 0 && payload.stop_hook_active !== true && BLOCK_FORM === 'decision';
+  try {
+    const id = payload.agent_id;
+    if (!blocking && safeId(sid) && typeof id === 'string' && id) {
+      updateState(sid, (s) => { s.finished[id] = new Date().toISOString(); return s; });
+    }
+  } catch { /* fail open */ }
   const repo = repoName(payload.cwd || process.cwd(), payload.cwd);
   const base = auditBase(payload, repo);
   // Collision scan: refused "modified since read" edits (no hook sees them, P5 B2). Deduplicated by tool_use_id.

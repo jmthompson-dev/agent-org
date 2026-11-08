@@ -5,11 +5,12 @@
 //      `sh -c '…'`, `FOO=1 kubectl apply`). The user's ask rules in settings.json stay the primary layer.
 //   2. Edit/Write/NotebookEdit by agent-org:quality-assurance-architect: `deny` anything that isn't a test path.
 //   3. (v0.2) Same-group edit deny: an agent-org specialist may not edit a file another agent of the same
-//      parallel group (same dispatch prompt_id) already changed (B3, D26).
+//      parallel group already changed (B3, D26): same dispatch prompt_id, or, when a prompt_id is missing,
+//      an agent that hasn't finished yet (concurrent agents are a parallel group by definition).
 //   4. (v0.2) Team gate: deny a named agent-org:* Agent call without an approved Mode: team (B4, D30).
 //   5. (v0.2) Audit and state protection: `ask` on tool calls that touch ~/.agent-org/audit or /state (C2, D27).
-//   6. (v0.2) Scope growth: `ask` when the main thread grows past ~3 files or first edits a risky path in a
-//      repo with no approval recorded for this session (D28).
+//   6. (v0.2) Scope growth: `ask` when the main thread grows past ~3 files, or edits a risky path of a kind
+//      it hasn't edited yet, in a repo with no approval recorded for this session (D28).
 // Decisions combine: any deny wins, else any ask (reasons joined). It never returns `allow`.
 // Rules 3, 4 and 6 read session state and fail open when it is missing or unreadable.
 // Dependency-free and fail-open: any error produces no output and exit code 0.
@@ -289,8 +290,10 @@ export function touchesProtected(tool, input, cwd) {
   return false;
 }
 
-// Risky paths for the scope guard (D2 of the v0.2 plan). Returns a kind or null.
-export function riskyKind(relPath) {
+// Risky paths for the scope guard (D2 of the v0.2 plan). Returns the kinds matched ([] if none):
+// `migration`, `ci`, `infra`, `auth`. record.mjs adds a kind to riskySeen[<repo>] after a successful edit.
+export const RISKY_LABELS = { migration: 'migration', ci: 'CI/CD', infra: 'infrastructure', auth: 'auth' };
+export function riskyKinds(relPath) {
   const parts = relPath.replace(/\\/g, '/').split('/').filter(Boolean);
   const base = parts[parts.length - 1] || '';
   const dirs = parts.slice(0, -1).map((d) => d.toLowerCase());
@@ -298,11 +301,11 @@ export function riskyKind(relPath) {
   const kinds = [];
   if (dirs.some((d) => ['migrations', 'migrate', 'alembic', 'flyway', 'liquibase'].includes(d))) kinds.push('migration');
   if (dirs.some((d, i) => d === '.github' && dirs[i + 1] === 'workflows') || lbase === '.gitlab-ci.yml'
-    || dirs.includes('.circleci') || base === 'Jenkinsfile' || lbase === 'azure-pipelines.yml' || dirs.includes('.buildkite')) kinds.push('CI/CD');
+    || dirs.includes('.circleci') || base === 'Jenkinsfile' || lbase === 'azure-pipelines.yml' || dirs.includes('.buildkite')) kinds.push('ci');
   if (/\.(tf|tfvars)$/i.test(base) || dirs.some((d) => ['terraform', 'k8s', 'kubernetes', 'helm', 'charts'].includes(d))
-    || /^kustomization\.ya?ml$/i.test(base) || base === 'Chart.yaml') kinds.push('infrastructure');
+    || /^kustomization\.ya?ml$/i.test(base) || base === 'Chart.yaml') kinds.push('infra');
   if (dirs.some((d) => ['auth', 'authn', 'authz', 'oauth', 'iam'].includes(d))) kinds.push('auth');
-  return kinds.length ? kinds.join(' and ') : null;
+  return kinds;
 }
 
 const samePath = (a, b) => {
@@ -312,7 +315,7 @@ const samePath = (a, b) => {
   return process.platform === 'win32' || process.platform === 'darwin' ? x.toLowerCase() === y.toLowerCase() : x === y;
 };
 
-// `state` is injected for tests: {session: {approvals, scope, dispatch} | null, ledger: [] | null}.
+// `state` is injected for tests: {session: {approvals, scope, dispatch, finished, riskySeen} | null, ledger: [] | null}.
 // null (or a missing part) means "unavailable": the rules that need it make no decision.
 // Returns {decision, rule, reason, effects?} or null. Never `allow`.
 export function decide(payload, state = null) {
@@ -352,11 +355,23 @@ export function decide(payload, state = null) {
     const me = typeof payload.agent_id === 'string' ? payload.agent_id : null;
     const target = editTarget(input);
     if (!me || !target) return;
-    const myGroup = session.dispatch[me] && session.dispatch[me].promptId;
-    if (!myGroup) return;
     const abs = path.resolve(cwd || '.', target);
-    const other = ledger.find((r) => !r.collision && r.agent_id && r.agent_id !== me && samePath(r.file, abs)
-      && session.dispatch[r.agent_id] && session.dispatch[r.agent_id].promptId === myGroup);
+    const dispatch = session.dispatch || {};
+    const finished = session.finished || {};
+    const myGroup = dispatch[me] && dispatch[me].promptId;
+    // Same group: both dispatched with the same prompt_id. If either prompt_id is missing, the other agent
+    // counts as the same group while it hasn't finished, so a missing id never switches the rule off.
+    const groupOf = (other) => {
+      const theirs = dispatch[other] && dispatch[other].promptId;
+      if (myGroup && theirs) return myGroup === theirs ? 'prompt_id' : null;
+      return finished[other] ? null : 'concurrent';
+    };
+    let method = null;
+    const other = ledger.find((r) => {
+      if (r.collision || !r.agent_id || r.agent_id === me || !samePath(r.file, abs)) return false;
+      method = groupOf(r.agent_id);
+      return Boolean(method);
+    });
     if (!other) return;
     const rel = cwd && isUnder(abs, path.resolve(cwd)) ? path.relative(path.resolve(cwd), abs) : path.basename(abs);
     denies.push({
@@ -364,7 +379,7 @@ export function decide(payload, state = null) {
       reason: `agent-org guard: ${rel} was changed by ${other.agent_type || 'another agent'} in this parallel group. Don't edit it; report BLOCKED: ${rel} changed by another agent.`,
     });
     effects.push({ kind: 'ledger', rec: { agent_id: me, agent_type: agentType, file: abs, collision: 'guard-deny' } });
-    effects.push({ kind: 'audit', repo: repoOfFile(abs, cwd), rec: { event: 'guard-deny', agent_id: me, agent_type: agentType, file: abs, flags: ['same-group-edit'] } });
+    effects.push({ kind: 'audit', repo: repoOfFile(abs, cwd), rec: { event: 'guard-deny', agent_id: me, agent_type: agentType, file: abs, flags: ['same-group-edit', `group: ${method}`] } });
   });
 
   // v0.2: team gate.
@@ -395,9 +410,12 @@ export function decide(payload, state = null) {
     if (seen.some((f) => samePath(f, abs))) return; // already edited this session
     const root = repoRoot(path.dirname(abs), cwd);
     const rel = isUnder(abs, root) ? path.relative(root, abs) : abs;
-    const kind = riskyKind(rel);
-    if (kind) {
-      asks.push({ rule: 'scope-risky-path', reason: `agent-org guard: ${kind} path with no approved intent in this session. Approve to continue, or escalate with agent-org:deliver.` });
+    // Once per kind per repo per session: a kind already edited successfully doesn't ask again.
+    const riskySeen = session.riskySeen && Array.isArray(session.riskySeen[repo]) ? session.riskySeen[repo] : [];
+    const kinds = riskyKinds(rel).filter((k) => !riskySeen.includes(k));
+    if (kinds.length) {
+      const label = kinds.map((k) => RISKY_LABELS[k]).join(' and ');
+      asks.push({ rule: 'scope-risky-path', reason: `agent-org guard: ${label} path with no approved intent in this session. Approve to continue, or escalate with agent-org:deliver.` });
     }
     const n = seen.length + 1;
     if (n > 3) {

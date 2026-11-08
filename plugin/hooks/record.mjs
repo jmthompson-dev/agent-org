@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // agent-org PostToolUse recorder (v0.2: B3, C1, D26–D28).
 //   Edit/Write/NotebookEdit by agent-org:*  → session ledger {agent_id, agent_type, file}
-//   Edit/Write/NotebookEdit by the main thread → scope counter per repo; approval when an intent file
+//   Edit/Write/NotebookEdit by the main thread → scope counter and risky kinds seen per repo; approval when an intent file
 //                                              under ~/.agent-org/intents/<repo>/ says **Status:** APPROVED
 //   Agent                                    → dispatch record {promptId, toolUseId, agentType} + audit `dispatch`
 //   SubagentHandback                         → A2 report-contract check; audit `claim-flag` if it fails
@@ -15,8 +15,9 @@ import {
   appendLedger, approvalFor, intentsRoot, isUnder, latestSessionId, orgDir, readLedger, readState,
   realpathLoose, resolvePath, safeId, updateState,
 } from './lib/state.mjs';
-import { repoName, repoOfFile } from './lib/repo.mjs';
+import { repoName, repoOfFile, repoRoot } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
+import { riskyKinds } from './guard.mjs';
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
 export const OUTCOME_RE = /^\s*(?:[#>*_`\s]*)Outcome:?(?:[*_`]*)\s*(PASS|FAIL|BLOCKED|SKIPPED|NOT RUN)\b/;
@@ -92,10 +93,20 @@ export function record(payload) {
       return;
     }
     const repo = repoOfFile(abs, cwd);
+    let kinds = [];
+    try {
+      const root = repoRoot(path.dirname(abs), cwd);
+      kinds = riskyKinds(isUnder(abs, root) ? path.relative(root, abs) : abs);
+    } catch { kinds = []; }
     updateState(sid, (s) => {
       const list = Array.isArray(s.scope[repo]) ? s.scope[repo] : [];
       if (!list.includes(abs)) list.push(abs);
       s.scope[repo] = list;
+      if (kinds.length) {
+        const seen = Array.isArray(s.riskySeen[repo]) ? s.riskySeen[repo] : [];
+        for (const k of kinds) if (!seen.includes(k)) seen.push(k);
+        s.riskySeen[repo] = seen;
+      }
       return s;
     });
     return;

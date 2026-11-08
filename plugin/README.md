@@ -45,17 +45,19 @@ Set `AGENT_ORG_HOOK_DEBUG=1` to append JSON lines to `~/.claude/agent-org/hook-d
 
 Prompt text, commands and file paths are never logged.
 
+`AGENT_ORG_BLOCK_FORM=additionalContext` switches the claim check from blocking the stop (`decision: block`, the default) to adding the reason as context. It exists for Phase 6 testing and will be removed once one form is chosen.
+
 ## Verification at every level
 
 - **Claim check** (`Stop`, every level): a sentence in Claude's final message that claims verification ("tests pass", "I ran", "build succeeds", "verified", "no errors", "N/N passed") needs a successful matching command in the same turn. Relayed specialist claims, quoted text and negated or hypothetical sentences are skipped.
 - **Citation check:** every file the final message cites (`path` or `path:line`) must have been opened this session (Read, Edit, Write, NotebookEdit, or a single-purpose `cat`/`head`/`tail`/`sed -n`/`grep`/`rg`/`nl`), by the main thread or a specialist. It catches invented or unopened files, not misread lines.
 - **Block once:** a failed check blocks the stop with the reason; on the second stop it only warns.
-- **Report contract** (`SubagentStop`): agent-org specialists start their report with `Outcome: PASS | FAIL | BLOCKED | SKIPPED | NOT RUN`, and a PASS needs a successful command in their own transcript.
+- **Report contract** (`SubagentStop`): agent-org specialists start their report with `Outcome: PASS | FAIL | BLOCKED | SKIPPED | NOT RUN`, and a PASS needs a successful command in their own transcript (for agents with no shell, any successful tool call). The PM is exempt: it returns an intent, saved as is.
 - **Level 3:** the independent QA reviewer reproduces the key claims before VERIFIED (a fresh QA instance if the reviewer wrote code or tests in the job). No extra auditor agent.
 
 ## Parallel work
 
-Parallel specialists share one working tree. The PM marks tasks parallel only when they own disjoint files ("Owns" column), don't consume each other's interface (or it's pinned in the intent) and each is worth a specialist. A ledger records which agent changed which file; the guard denies an edit to a file another agent of the same parallel group already changed. Before validation, `deliver` checks the ledger against "Owns" and `git diff`. Any collision stops the job and goes back to the PM for a sequential rerun and a new approval. There is never a fixer agent.
+Parallel specialists share one working tree. The PM marks tasks parallel only when they own disjoint files ("Owns" column), don't consume each other's interface (or it's pinned in the intent) and each is worth a specialist. A ledger records which agent changed which file; the guard denies an edit to a file another agent of the same parallel group already changed (same dispatch turn, or, when that id is missing, an agent that hasn't finished yet). Before validation, `deliver` checks the ledger against "Owns" and `git diff`. Any collision stops the job and goes back to the PM for a sequential rerun and a new approval. There is never a fixer agent.
 
 ## Agent teams (optional, experimental)
 
@@ -63,15 +65,15 @@ A justified fallback, not a default: the PM may mark a task group `Mode: team` o
 
 ## Audit log
 
-Hooks append to `~/.agent-org/audit/<repo>.jsonl`: dispatches (with the resolved model), results (outcome, command counts, flags), collisions, guard denies, claim flags and team events. Metadata only: never prompts, commands, file content, messages or report text. Each line is hash-chained to the previous one; a head record in `~/.agent-org/state/` catches an edited last line or a truncated tail. Files rotate at 10 MB with the chain carried across. Each session start checks the chain incrementally and warns if it's broken; `/agent-org:audit-verify` runs a full check. **Tamper-evident, not tamper-proof:** the model can still reach the files through Bash, behind a guard `ask`.
+Hooks append to `~/.agent-org/audit/<repo>.jsonl`: dispatches (with the resolved model), results (outcome, command counts, flags), collisions, guard denies, claim flags and team events. Metadata only: never prompts, commands, file content, messages or report text. Each line is hash-chained to the previous one; a head record in `~/.agent-org/state/` catches an edited last line or a truncated tail. Files rotate at 10 MB to `<repo>.jsonl.<n>` with the chain carried across. Each session start checks the active file incrementally and warns if the chain is broken; rotated files are fully checked only by `/agent-org:audit-verify` (or by the first check, before any checkpoint exists). **Tamper-evident, not tamper-proof:** the model can still reach the files through Bash, behind a guard `ask`.
 
 ## Scope guard
 
-Without an approval recorded in this session for the repo, a main-thread edit that would make more than 3 distinct files edited, or a first edit to a migration, CI, IaC/k8s/helm or auth path, gets an `ask`. Approving an intent (`**Status:** APPROVED`) records the approval for the session: it survives resume and compaction, not `/clear` or a fork.
+Without an approval recorded in this session for the repo, a main-thread edit that would make more than 3 distinct files edited, or the first edit of each kind (migration, CI, IaC/k8s/helm, auth) to a risky path, gets an `ask`; once an edit of a kind has gone through, later files of that kind don't ask again. Approving an intent (`**Status:** APPROVED`) records the approval for the session: it survives resume and compaction, not `/clear` or a fork.
 
 ## State files
 
-`~/.agent-org/state/<session_id>/` holds approvals, the scope counter, dispatch records and the edit ledger; `~/.agent-org/state/audit-<repo>.head` holds the audit head records. Safe to delete when no session is running: deleting resets approvals and counters, and a deleted head record means the next check can't detect tail edits made before it.
+`~/.agent-org/state/<session_id>/` holds approvals, the scope counter, risky kinds seen, dispatch and finish records, and the edit ledger; `~/.agent-org/state/audit-<repo>.head` holds the audit head records. Safe to delete when no session is running: deleting resets approvals and counters, and a deleted head record means the next check can't detect tail edits made before it.
 
 ## Persona sync (maintainers)
 

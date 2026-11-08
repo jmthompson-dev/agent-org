@@ -1,6 +1,6 @@
 // agent-org: hash-chained, rotated, tamper-evident audit log (C1, C2, D27; P5 C5).
 //   ~/.agent-org/audit/<repo>.jsonl          active file; one JSON object per line
-//   ~/.agent-org/audit/<repo>-<n>.jsonl      rotated files, oldest first
+//   ~/.agent-org/audit/<repo>.jsonl.<n>      rotated files, oldest first (log-rotation style: no repo name can clash)
 //   ~/.agent-org/state/audit-<repo>.head     {file, index, rotated, lines, bytes, lastHash, checkpoint: {offset, line, hash}}
 // Each line carries `prev` (the previous line's `h`) and `h` = sha256(prev + canonical(line without h)).
 // The chain runs across rotated files. Appends and head updates happen in one locked section.
@@ -63,7 +63,7 @@ function writeHead(repo, head) {
 function rotatedFiles(repo, head) {
   if (head && Array.isArray(head.rotated)) return head.rotated.filter((f) => typeof f === 'string');
   const base = safeRepo(repo);
-  const re = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(\\d+)\\.jsonl$`);
+  const re = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.jsonl\\.(\\d+)$`);
   try {
     return fs.readdirSync(auditRoot())
       .map((f) => [f, re.exec(f)])
@@ -115,10 +115,10 @@ export function append(repo, fields) {
     let actualBytes = 0;
     try { actualBytes = fs.statSync(file).size; } catch { actualBytes = 0; }
     if (actualBytes > 0 && actualBytes + len > maxBytes()) {
-      // Rotate: pick the next free <repo>-<n>.jsonl, never overwriting an existing file.
+      // Rotate: pick the next free <repo>.jsonl.<n>, never overwriting an existing file.
       let n = (Number(head.index) || head.rotated.length) + 1;
-      while (fs.existsSync(path.join(dir, `${safeRepo(repo)}-${n}.jsonl`))) n++;
-      const rotatedName = `${safeRepo(repo)}-${n}.jsonl`;
+      while (fs.existsSync(path.join(dir, `${safeRepo(repo)}.jsonl.${n}`))) n++;
+      const rotatedName = `${safeRepo(repo)}.jsonl.${n}`;
       fs.renameSync(file, path.join(dir, rotatedName));
       head.rotated.push(rotatedName);
       head.index = n;
@@ -224,13 +224,10 @@ export function listRepos() {
     }
   } catch { /* none */ }
   try {
-    const files = fs.readdirSync(auditRoot()).filter((f) => f.endsWith('.jsonl'));
-    for (const f of files) {
-      const base = f.slice(0, -'.jsonl'.length);
-      const m = /^(.+)-(\d+)$/.exec(base);
-      // `<x>-<n>.jsonl` is a rotated file when repo <x> is known; otherwise treat it as a repo of its own.
-      if (m && (heads.has(m[1]) || files.includes(`${m[1]}.jsonl`))) continue;
-      names.add(base);
+    for (const f of fs.readdirSync(auditRoot())) {
+      // Active `<repo>.jsonl` or rotated `<repo>.jsonl.<n>`: both name the repo unambiguously.
+      const m = /^(.+)\.jsonl(?:\.\d+)?$/.exec(f);
+      if (m) names.add(m[1]);
     }
   } catch { /* none */ }
   return [...names].sort();

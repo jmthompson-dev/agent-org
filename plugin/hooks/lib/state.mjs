@@ -1,7 +1,8 @@
 // agent-org: per-session state (D26, D28; P5 D1, D2, D5).
 //   ~/.agent-org/state/<session_id>/state.json   {approvals: [{repo, intent, mode, approvedAt}],
 //                                                 scope: {<repo>: [files]},
-//                                                 dispatch: {<agentId>: {promptId, toolUseId, agentType}}}
+//                                                 dispatch: {<agentId>: {promptId, toolUseId, agentType}},
+//                                                 finished: {<agentId>: ts}, riskySeen: {<repo>: [kinds]}}
 //   ~/.agent-org/state/<session_id>/ledger.jsonl  {ts, agent_id, agent_type, file[, collision, tool_use_id]}
 // Metadata only, never content. Writes go through the lock; JSON updates are temp file plus rename.
 // The session id scopes everything: approvals survive resume and compaction, not /clear or a fork.
@@ -25,7 +26,7 @@ export function sessionDir(sessionId) {
   return id ? path.join(stateRoot(), id) : null;
 }
 
-export const emptyState = () => ({ approvals: [], scope: {}, dispatch: {} });
+export const emptyState = () => ({ approvals: [], scope: {}, dispatch: {}, finished: {}, riskySeen: {} });
 
 function normalizeState(s) {
   if (!s || typeof s !== 'object' || Array.isArray(s)) throw new Error('bad state');
@@ -33,6 +34,8 @@ function normalizeState(s) {
     approvals: Array.isArray(s.approvals) ? s.approvals : [],
     scope: s.scope && typeof s.scope === 'object' && !Array.isArray(s.scope) ? s.scope : {},
     dispatch: s.dispatch && typeof s.dispatch === 'object' && !Array.isArray(s.dispatch) ? s.dispatch : {},
+    finished: s.finished && typeof s.finished === 'object' && !Array.isArray(s.finished) ? s.finished : {},
+    riskySeen: s.riskySeen && typeof s.riskySeen === 'object' && !Array.isArray(s.riskySeen) ? s.riskySeen : {},
   };
 }
 
