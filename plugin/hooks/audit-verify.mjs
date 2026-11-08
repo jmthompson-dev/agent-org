@@ -3,7 +3,7 @@
 //   node audit-verify.mjs [--repo <name>]
 // Walks every rotated file and the active file, recomputes every hash, checks every `prev`, and compares
 // the end state with the head record. Prints one line per repo. Exit 1 on any break.
-// Never modifies the log or the head record (it doesn't move the checkpoint either).
+// Never modifies the log or the head record.
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +13,7 @@ export function verifyLines(repos) {
   const lines = [];
   let broken = false;
   for (const repo of repos) {
-    const r = verify(repo, { full: true, readOnly: true });
+    const r = verify(repo, { full: true });
     if (r.absent) { lines.push(`OK ${repo} 0 lines in 0 files (no audit log)`); continue; }
     if (r.ok) {
       lines.push(`OK ${repo} ${r.lines} lines in ${r.files} files${r.noHead ? ' (no head record: tail edits are undetectable)' : ''}`);

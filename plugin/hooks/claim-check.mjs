@@ -1,27 +1,27 @@
 #!/usr/bin/env node
 // agent-org claim check (v0.2: A1, A2; D25). Runs on Stop (main thread) and SubagentStop (agent-org:*).
 //   Stop: every verification claim in the final text needs a successful matching tool call in the
-//         current turn, and every cited file must have been opened this session. Relayed, quoted,
-//         negated and retracted sentences are skipped.
+//         current turn (or, in a turn with no tool calls, the previous turn), and every `path:line` citation
+//         must name a file opened, or seen in successful tool output, this session. Relayed, quoted, negated,
+//         retracted and future-tense or plan sentences are skipped (v0.2c, F2).
 //   SubagentStop: the report contract (first line `Outcome: …`; a PASS needs a successful command in the
 //         agent's own transcript), a scan for refused "modified since read" edits (collisions), an audit
 //         `result` record, and finished[agent_id] in the session state (for the guard's same-group fallback).
 //         The PM is exempt from the report contract: it returns an intent (audited with outcome `plan`).
-// Blocks once (stop_hook_active false); on the second stop it only warns. Fail-open, no content logged.
+// Blocks once (stop_hook_active false) with hookSpecificOutput.additionalContext (v0.2c: "Stop hook feedback",
+// Phase 6); on the second stop it only warns. Agent identity goes through effectiveType() (F1).
+// Fail-open, no content logged.
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  filesOpenedInSession, finalAssistantText, isShell, readJsonl, refusedStaleEdits, subagentTranscripts,
-  succeeded, toolCalls, toolCallsInTurn,
+  filesOpenedInSession, filesSeenInOutput, finalAssistantText, isShell, readJsonl, refusedStaleEdits,
+  subagentTranscripts, succeeded, toolCalls, toolCallsInPreviousTurn, toolCallsInTurn,
 } from './lib/transcript.mjs';
-import { appendLedger, readLedger, safeId, updateState } from './lib/state.mjs';
+import { appendLedger, effectiveType, readLedger, readState, safeId, updateState } from './lib/state.mjs';
 import { repoName } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
 import { auditBase, parseOutcome } from './record.mjs';
-
-// "decision" (verified, P5 A2) or "additionalContext" (docs-only softer form). Phase 6 decides.
-export const BLOCK_FORM = process.env.AGENT_ORG_BLOCK_FORM === 'additionalContext' ? 'additionalContext' : 'decision';
 
 // The PM returns an intent, not a report: exempt from the report contract ("PASS" on a plan means nothing).
 const PM = 'agent-org:principal-project-manager';
@@ -38,12 +38,11 @@ function stripFences(text) {
   return text.replace(/^[ \t]*(```|~~~)[\s\S]*?^[ \t]*\1[^\n]*$/gm, ' ');
 }
 
+const stripQuotes = (t) => t.split('\n').filter((l) => !/^\s*>/.test(l)).join('\n').replace(/"[^"\n]*"|“[^”\n]*”/g, ' ');
+
 // Text the claim scan may judge: no fences, no blockquotes, no inline code, no quoted strings.
 function claimableText(text) {
-  return stripFences(text)
-    .split('\n').filter((l) => !/^\s*>/.test(l)).join('\n')
-    .replace(/`[^`\n]*`/g, ' ')
-    .replace(/"[^"\n]*"|“[^”\n]*”/g, ' ');
+  return stripQuotes(stripFences(text)).replace(/`[^`\n]*`/g, ' ');
 }
 
 export function sentences(text) {
@@ -60,7 +59,10 @@ const CLAIMS = [
   { kind: 'any', re: /\bno\s+errors\b/i },
   { kind: 'lint', re: /\blints?\s+(?:is\s+|are\s+)?clean\b/i },
 ];
-const NEGATED = /\b(?:not|never|didn't|didn’t|haven't|haven’t|hasn't|wasn't|weren't|cannot|can't|unverified|retract\w*|would|should|if|unless)\b|n't\b/i;
+const NEGATED = /\b(?:not|never|nothing|didn't|didn’t|haven't|haven’t|hasn't|wasn't|weren't|cannot|can't|unverified|retract\w*|would|should|if|unless)\b|n't\b/i;
+// v0.2c (F2): future-tense or plan sentences describe what will happen, not what did.
+const FUTURE = /\b(?:I'll|I’ll|I\s+will|will|going\s+to|once|after|before|next|then\s+I)\b/i;
+const skipSentence = (s) => NEGATED.test(s) || FUTURE.test(s);
 
 const TEST_CMD = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|node\s+--test\b|pytest\b|python\d*(?:\.\d+)?\s+-m\s+(?:pytest|unittest)\b|mvnw?\b[^|;&]*\b(?:test|verify)\b|gradlew?\b[^|;&]*\btest\b|go\s+test\b|cargo\s+test\b|make\s+(?:test|check)\b|jest\b|vitest\b|deno\s+test\b|dotnet\s+test\b|rspec\b|phpunit\b|tox\b|ctest\b)/i;
 const BUILD_CMD = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b|tsc\b|mvnw?\b[^|;&]*\b(?:package|install|compile|verify)\b|gradlew?\b[^|;&]*\b(?:build|assemble)\b|go\s+build\b|cargo\s+build\b|make\b|dotnet\s+build\b|vite\s+build\b|webpack\b|docker\s+build\b)/i;
@@ -98,30 +100,35 @@ export function findClaims(text, specialistTexts = []) {
   const out = [];
   for (const s of sentences(claimableText(text))) {
     const hit = CLAIMS.find((c) => c.re.test(s));
-    if (!hit || NEGATED.test(s)) continue;
+    if (!hit || skipSentence(s)) continue;
     if (isRelayed(s, specialistTexts)) continue;
     out.push({ sentence: s, kind: hit.kind });
   }
   return out;
 }
 
-// Citations: path or path:line tokens with a known file extension, or a slash path with :line.
+// Citations (v0.2c, F2): only `<path>:<line>` (optionally `:<line>-<line>`) where <path> has a known file
+// extension or a `/`. Bare paths, planned files and URL routes are never checked.
 const EXT = 'js|mjs|cjs|jsx|ts|tsx|mts|cts|json|jsonc|jsonl|md|mdx|py|pyi|rb|go|rs|java|kt|kts|scala|groovy|c|h|cc|cpp|cxx|hpp|cs|fs|swift|m|mm|php|sh|bash|zsh|fish|ps1|psm1|bat|cmd|yml|yaml|toml|ini|cfg|conf|xml|html|htm|css|scss|sass|less|vue|svelte|astro|sql|proto|graphql|gql|tf|tfvars|hcl|gradle|properties|env|txt|lock|mk|cmake|ex|exs|erl|clj|cljs|lua|r|dart|ipynb|csv|tsv|rst|adoc|tex|vim|el|nix|zig|sol|prisma';
-const CITE_RE = new RegExp(String.raw`(?<![\w@/.~-])((?:~|\.{1,2})?/?(?:[\w@.+-]+/)*[\w@+-][\w@.+-]*\.(?:${EXT}))(?::\d+(?:[-–]\d+)?)?(?![\w/-])|(?<![\w@/.~-])((?:[\w@.+-]+/)+[\w@.+-]+):\d+`, 'gi');
+const CITE_RE = new RegExp(String.raw`(?<![\w@/.~:-])((?:~|\.{1,2})?/?(?:[\w@.+-]+/)*[\w@+-][\w@.+-]*\.(?:${EXT})|(?:~|\.{1,2})?/?(?:[\w@.+-]+/)+[\w@.+-]+):\d+(?:[-–]\d+)?(?![\w/])`, 'gi');
 const NOT_FILES = /^(?:node|next|nuxt|vue|react|express|three|chart|d3|socket\.io|ember|backbone|angular|deno)\.js$/i;
 
 export function findCitations(text) {
-  const clean = stripFences(text).replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s)>\]]+/gi, ' ');
+  const clean = stripQuotes(stripFences(text)).replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s)>\]]+/gi, ' ');
   const out = new Set();
-  for (const m of clean.matchAll(CITE_RE)) {
-    const p = m[1] || m[2];
-    if (!p || NOT_FILES.test(p) || /^\d/.test(p)) continue;
-    out.add(p);
+  for (const s of sentences(clean)) {
+    if (skipSentence(s)) continue;
+    for (const m of s.matchAll(CITE_RE)) {
+      const p = m[1];
+      if (!p || NOT_FILES.test(p) || /^\d/.test(p)) continue;
+      out.add(p);
+    }
   }
   return [...out];
 }
 
-function citedButNotOpened(citations, opened, cwd) {
+// `seenNames` holds bare file names seen in tool output (no directory part to resolve).
+function citedButNotOpened(citations, opened, cwd, seenNames = new Set()) {
   const all = [...opened];
   const missing = [];
   for (const c of citations) {
@@ -130,6 +137,7 @@ function citedButNotOpened(citations, opened, cwd) {
     const tail = c.replace(/^\.\//, '').split(/[\\/]/).filter(Boolean).join('/');
     // Tolerate citations relative to a subdirectory or a bare file name: invented files are still caught.
     if (all.some((f) => f.split(path.sep).join('/').endsWith(`/${tail}`))) continue;
+    if (seenNames.has(path.basename(tail))) continue;
     missing.push(c);
   }
   return missing;
@@ -143,8 +151,8 @@ function output(event, failures, payload) {
   if (payload.stop_hook_active === true) {
     return { systemMessage: `agent-org claim check (unresolved after one retry): ${failures.join('; ')}.` };
   }
-  if (BLOCK_FORM === 'additionalContext') return { hookSpecificOutput: { hookEventName: event, additionalContext: text } };
-  return { decision: 'block', reason: text };
+  // v0.2c: additionalContext continues the turn like `decision` and shows as "Stop hook feedback" (Phase 6).
+  return { hookSpecificOutput: { hookEventName: event, additionalContext: text } };
 }
 
 const short = (s) => (s.length > 80 ? `${s.slice(0, 77)}…` : s);
@@ -164,7 +172,9 @@ export function checkStop(payload) {
     try { subs.push(readJsonl(f)); } catch { /* skip */ }
   }
   const specialistTexts = subs.map(finalAssistantText).filter(Boolean);
-  const calls = toolCallsInTurn(entries);
+  let calls = toolCallsInTurn(entries);
+  // v0.2c: a turn with no tool calls (a summary or answer) may restate the previous turn's evidence.
+  if (!calls.length) calls = toolCallsInPreviousTurn(entries);
   const failures = [];
   const kinds = new Set();
 
@@ -174,11 +184,24 @@ export function checkStop(payload) {
       kinds.add(`unbacked-${c.kind}`);
     }
   }
-  const opened = filesOpenedInSession(entries, cwd);
-  for (const s of subs) for (const f of filesOpenedInSession(s, cwd)) opened.add(f);
-  for (const f of citedButNotOpened(findCitations(finalText), opened, cwd)) {
-    failures.push(`you cite ${f} but never opened it this session: read it or drop the claim`);
-    kinds.add('uncited-file');
+  const citations = findCitations(finalText);
+  if (citations.length) {
+    const opened = filesOpenedInSession(entries, cwd);
+    const seenNames = new Set();
+    const addSeen = (list) => {
+      for (const s of list) {
+        for (const f of filesSeenInOutput(s, cwd)) {
+          if (f.includes('/') || f.includes('\\')) opened.add(f);
+          else seenNames.add(f);
+        }
+      }
+    };
+    for (const s of subs) for (const f of filesOpenedInSession(s, cwd)) opened.add(f);
+    addSeen([entries, ...subs]);
+    for (const f of citedButNotOpened(citations, opened, cwd, seenNames)) {
+      failures.push(`you cite ${f} but never opened it this session: read it or drop the claim`);
+      kinds.add('uncited-file');
+    }
   }
   if (!failures.length) return null;
   return { out: output('Stop', failures, payload), kinds: [...kinds] };
@@ -188,7 +211,11 @@ export function checkStop(payload) {
 // SubagentStop (agent-org specialists)
 
 export function checkSubagentStop(payload) {
-  const type = typeof payload.agent_type === 'string' ? payload.agent_type : '';
+  let type = typeof payload.agent_type === 'string' ? payload.agent_type : '';
+  if (type && !type.startsWith('agent-org:')) {
+    // v0.2c (F1): a teammate's agent_type is its name; the dispatch record maps it back.
+    try { type = effectiveType(payload, readState(payload.session_id)) || type; } catch { /* fail open */ }
+  }
   if (!type.startsWith('agent-org:')) return null;
   const text = typeof payload.last_assistant_message === 'string' ? payload.last_assistant_message : '';
   let entries = [];
@@ -216,7 +243,7 @@ export function checkSubagentStop(payload) {
   const sid = payload.session_id;
   // Finished agents' files are fair game for later sequential tasks (guard's same-group fallback).
   // A stop this hook blocks isn't a finish: the agent keeps working, so it's recorded on its next stop.
-  const blocking = failures.length > 0 && payload.stop_hook_active !== true && BLOCK_FORM === 'decision';
+  const blocking = failures.length > 0 && payload.stop_hook_active !== true;
   try {
     const id = payload.agent_id;
     if (!blocking && safeId(sid) && typeof id === 'string' && id) {
@@ -249,7 +276,7 @@ export function checkSubagentStop(payload) {
   } catch { /* fail open */ }
 
   if (!failures.length) return null;
-  return { out: output('SubagentStop', failures, payload), kinds };
+  return { out: output('SubagentStop', failures, payload), kinds, agentType: type };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -262,7 +289,7 @@ export function check(payload) {
   try {
     const repo = repoName(payload.cwd || process.cwd(), payload.cwd);
     auditAppend(repo, {
-      ...auditBase(payload, repo), event: 'claim-flag', agent_id: payload.agent_id, agent_type: payload.agent_type || undefined,
+      ...auditBase(payload, repo), event: 'claim-flag', agent_id: payload.agent_id, agent_type: r.agentType || payload.agent_type || undefined,
       flags: [...r.kinds.filter((k) => k !== 'refused-stale-edit'), r.out.systemMessage ? 'warned' : 'blocked'],
     });
   } catch { /* fail open */ }

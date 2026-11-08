@@ -2,9 +2,12 @@
 // agent-org PostToolUse recorder (v0.2: B3, C1, D26–D28).
 //   Edit/Write/NotebookEdit by agent-org:*  → session ledger {agent_id, agent_type, file}
 //   Edit/Write/NotebookEdit by the main thread → scope counter and risky kinds seen per repo; approval when an intent file
-//                                              under ~/.agent-org/intents/<repo>/ says **Status:** APPROVED
-//   Agent                                    → dispatch record {promptId, toolUseId, agentType} + audit `dispatch`
-//   SubagentHandback                         → A2 report-contract check; audit `claim-flag` if it fails
+//                                              under ~/.agent-org/intents/<repo>/ says **Status:** APPROVED; an Edit
+//                                              of an already approved intent outside the status line, approval log,
+//                                              evidence or validation is audited `intent-edited-after-approval` (F6)
+//   Agent                                    → dispatch record {promptId, toolUseId, agentType, teammate} + audit `dispatch`
+//   SubagentHandback                         → A2 report-contract check (PM exempt, F9); audit `claim-flag` if it fails
+// Agent identity goes through effectiveType() (v0.2c, F1): teammates carry agent_type = their name.
 // CLI: node record.mjs --ledger [--session <id>]  prints the per-agent file summary and collision flags.
 // Dependency-free and fail-open. Metadata only: never content, commands or report text.
 
@@ -12,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  appendLedger, approvalFor, intentsRoot, isUnder, latestSessionId, orgDir, readLedger, readState,
+  appendLedger, approvalFor, effectiveType, intentsRoot, isUnder, latestSessionId, orgDir, readLedger, readState,
   realpathLoose, resolvePath, safeId, updateState,
 } from './lib/state.mjs';
 import { repoName, repoOfFile, repoRoot } from './lib/repo.mjs';
@@ -20,6 +23,7 @@ import { append as auditAppend } from './lib/audit.mjs';
 import { riskyKinds } from './guard.mjs';
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
+const PM = 'agent-org:principal-project-manager';
 export const OUTCOME_RE = /^\s*(?:[#>*_`\s]*)Outcome:?(?:[*_`]*)\s*(PASS|FAIL|BLOCKED|SKIPPED|NOT RUN)\b/;
 
 // First non-empty line of a report, checked against the report contract (A2).
@@ -36,6 +40,25 @@ const MODE_TEAM = /^\s*(?:[-*]\s+)?\*\*Mode:\*\*\s*`?team\b/im;
 export function intentApproval(text) {
   if (typeof text !== 'string' || !STATUS_APPROVED.test(text)) return null;
   return { mode: MODE_TEAM.test(text) ? 'team' : 'subagents' };
+}
+
+// After approval the main thread may edit only the status line, the approval log and the evidence or
+// validation sections (B6). Returns the `## ` heading an Edit landed in when it's outside those, else null.
+const STATUS_LINE = /^\s*\*\*Status:\*\*/;
+const ALLOWED_SECTION = /^(?:approval log|evidence|validation)\b/i;
+export function intentEditSection(text, newString) {
+  if (typeof text !== 'string' || typeof newString !== 'string') return null;
+  const lines = newString.split('\n').filter((l) => l.trim());
+  if (lines.length && lines.every((l) => STATUS_LINE.test(l))) return null;
+  const at = newString ? text.indexOf(newString) : -1;
+  if (at < 0) return '(unknown section)';
+  let heading = null;
+  for (const m of text.slice(0, at + 1).matchAll(/^##[ \t]+(.+?)[ \t#]*$/gm)) heading = m[1].trim();
+  // The edit may itself start with the heading line.
+  const own = /^##[ \t]+(.+?)[ \t#]*$/m.exec(newString);
+  if (own && newString.trimStart().startsWith('##')) heading = own[1].trim();
+  if (heading && ALLOWED_SECTION.test(heading)) return null;
+  return heading || '(before the first section)';
 }
 
 // Intent id for audit records: "<repo>/<file>", never an absolute path.
@@ -60,10 +83,13 @@ export function record(payload) {
   if (!payload || typeof payload !== 'object') return;
   const tool = payload.tool_name;
   const input = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input : {};
-  const agentType = typeof payload.agent_type === 'string' && payload.agent_type ? payload.agent_type : null;
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : undefined;
   const sid = payload.session_id;
   if (!safeId(sid)) return;
+  let agentType = typeof payload.agent_type === 'string' && payload.agent_type ? payload.agent_type : null;
+  if (agentType) {
+    try { agentType = effectiveType(payload, readState(sid)) || agentType; } catch { /* fail open: v0.1 identity */ }
+  }
 
   if (EDIT_TOOLS.has(tool)) {
     const target = input.file_path || input.notebook_path;
@@ -83,6 +109,20 @@ export function record(payload) {
       const repo = id.split('/')[0];
       let text = '';
       try { text = fs.readFileSync(abs, 'utf8'); } catch { return; }
+      // F6: an approved intent's plan is the PM's; detect (don't block) other main-thread edits to it.
+      try {
+        const st = readState(sid);
+        const wasApproved = st.approvals.some((a) => a && a.repo === repo && a.intent === id);
+        if (wasApproved && tool === 'Edit') {
+          const section = intentEditSection(text, input.new_string);
+          if (section) {
+            auditAppend(repo, {
+              session: sid, intent: id, event: 'claim-flag', tool_use_id: payload.tool_use_id,
+              flags: ['intent-edited-after-approval', section],
+            });
+          }
+        }
+      } catch { /* fail open */ }
       const ap = intentApproval(text);
       if (!ap) return;
       updateState(sid, (s) => {
@@ -118,7 +158,10 @@ export function record(payload) {
     const type = typeof input.subagent_type === 'string' ? input.subagent_type : (resp.agentType || null);
     if (typeof agentId !== 'string' || !agentId) return;
     updateState(sid, (s) => {
-      s.dispatch[agentId] = { promptId: payload.prompt_id ?? null, toolUseId: payload.tool_use_id ?? null, agentType: type };
+      s.dispatch[agentId] = {
+        promptId: payload.prompt_id ?? null, toolUseId: payload.tool_use_id ?? null, agentType: type,
+        teammate: resp.status === 'teammate_spawned',
+      };
       return s;
     });
     if (type && type.startsWith('agent-org:')) {
@@ -136,7 +179,7 @@ export function record(payload) {
   }
 
   if (tool === 'SubagentHandback') {
-    if (!agentType || !agentType.startsWith('agent-org:')) return;
+    if (!agentType || !agentType.startsWith('agent-org:') || agentType === PM) return;
     const outcome = parseOutcome(input.message);
     if (outcome) return;
     const repo = repoName(cwd || process.cwd(), cwd);

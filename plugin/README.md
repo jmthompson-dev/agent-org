@@ -45,27 +45,25 @@ Set `AGENT_ORG_HOOK_DEBUG=1` to append JSON lines to `~/.claude/agent-org/hook-d
 
 Prompt text, commands and file paths are never logged.
 
-`AGENT_ORG_BLOCK_FORM=additionalContext` switches the claim check from blocking the stop (`decision: block`, the default) to adding the reason as context. It exists for Phase 6 testing and will be removed once one form is chosen.
-
 ## Verification at every level
 
-- **Claim check** (`Stop`, every level): a sentence in Claude's final message that claims verification ("tests pass", "I ran", "build succeeds", "verified", "no errors", "N/N passed") needs a successful matching command in the same turn. Relayed specialist claims, quoted text and negated or hypothetical sentences are skipped.
-- **Citation check:** every file the final message cites (`path` or `path:line`) must have been opened this session (Read, Edit, Write, NotebookEdit, or a single-purpose `cat`/`head`/`tail`/`sed -n`/`grep`/`rg`/`nl`), by the main thread or a specialist. It catches invented or unopened files, not misread lines.
-- **Block once:** a failed check blocks the stop with the reason; on the second stop it only warns.
-- **Report contract** (`SubagentStop`): agent-org specialists start their report with `Outcome: PASS | FAIL | BLOCKED | SKIPPED | NOT RUN`, and a PASS needs a successful command in their own transcript (for agents with no shell, any successful tool call). The PM is exempt: it returns an intent, saved as is.
+- **Claim check** (`Stop`, every level): a sentence in Claude's final message that claims verification ("tests pass", "I ran", "build succeeds", "verified", "no errors", "N/N passed") needs a successful matching command in the same turn (in a turn with no tool calls, the previous turn's command counts). Relayed specialist claims, quoted text, and negated, hypothetical or future-tense sentences are skipped.
+- **Citation check:** every `path:line` citation in the final message must name a file opened this session (Read, Edit, Write, NotebookEdit, or a single-purpose `cat`/`head`/`tail`/`sed -n`/`grep`/`rg`/`nl`) or seen in successful Grep, Glob or Bash output, by the main thread or a specialist. Bare paths, planned files, URL routes and negated or future-tense sentences aren't checked. It catches invented or unopened files cited with a line, not misread lines.
+- **Block once:** a failed check continues the turn with the reason (shown as "Stop hook feedback"); on the second stop it only warns.
+- **Report contract** (`SubagentStop`, `SubagentHandback`): agent-org specialists start their report with `Outcome: PASS | FAIL | BLOCKED | SKIPPED | NOT RUN`, and a PASS needs a successful command in their own transcript (for agents with no shell, any successful tool call). The PM is exempt: it returns an intent, saved as is.
 - **Level 3:** the independent QA reviewer reproduces the key claims before VERIFIED (a fresh QA instance if the reviewer wrote code or tests in the job). No extra auditor agent.
 
 ## Parallel work
 
-Parallel specialists share one working tree. The PM marks tasks parallel only when they own disjoint files ("Owns" column), don't consume each other's interface (or it's pinned in the intent) and each is worth a specialist. A ledger records which agent changed which file; the guard denies an edit to a file another agent of the same parallel group already changed (same dispatch turn, or, when that id is missing, an agent that hasn't finished yet). Before validation, `deliver` checks the ledger against "Owns" and `git diff`. Any collision stops the job and goes back to the PM for a sequential rerun and a new approval. There is never a fixer agent.
+Parallel specialists share one working tree. The PM marks tasks parallel only when they own disjoint files ("Owns" column), don't consume each other's interface (or it's pinned in the intent) and each is worth a specialist. A ledger records which agent changed which file; the guard denies an edit to a file another agent of the same parallel group already changed (same dispatch turn, or, when that id is missing, an agent that hasn't finished yet). Before validation, `deliver` checks the ledger against "Owns" and `git diff`. Any collision stops the job and goes back to the PM for a sequential rerun and a new approval. There is never a fixer agent. After approval the main thread doesn't change the plan itself: edits to an approved intent outside the status line, approval log, evidence and validation are audited as `intent-edited-after-approval`.
 
 ## Agent teams (optional, experimental)
 
-A justified fallback, not a default: the PM may mark a task group `Mode: team` only when a hand-off can't be written down up front, and you approve the mode at the normal gate. It needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and an interactive session; in-process teammates only. Without an approved team mode, the guard denies any named `agent-org:*` dispatch (a named call would start a team).
+A justified fallback, not a default: the PM may mark a task group `Mode: team` only when a hand-off can't be written down up front, and you approve the mode at the normal gate. It needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and an interactive session; in-process teammates only. Without an approved team mode, the guard denies any named `agent-org:*` dispatch (a named call would start a team). Teammate hooks carry the teammate's name as `agent_type`, so every check maps the teammate back to its `agent-org:*` type through the dispatch record. Teammates run in auto permission mode, so the guard denies them ask-list commands (commit, push, deploy, …) instead of asking: they report to the lead, and the lead asks you.
 
 ## Audit log
 
-Hooks append to `~/.agent-org/audit/<repo>.jsonl`: dispatches (with the resolved model), results (outcome, command counts, flags), collisions, guard denies, claim flags and team events. Metadata only: never prompts, commands, file content, messages or report text. Each line is hash-chained to the previous one; a head record in `~/.agent-org/state/` catches an edited last line or a truncated tail. Files rotate at 10 MB to `<repo>.jsonl.<n>` with the chain carried across. Each session start checks the active file incrementally and warns if the chain is broken; rotated files are fully checked only by `/agent-org:audit-verify` (or by the first check, before any checkpoint exists). **Tamper-evident, not tamper-proof:** the model can still reach the files through Bash, behind a guard `ask`.
+Hooks append to `~/.agent-org/audit/<repo>.jsonl`: dispatches (with the resolved model), results (outcome, command counts, flags), collisions, guard denies, claim flags and team events. Metadata only: never prompts, commands, file content, messages or report text. Each line is hash-chained to the previous one; a head record in `~/.agent-org/state/` catches an edited last line or a truncated tail. Files rotate at 10 MB to `<repo>.jsonl.<n>` with the chain carried across. Each session start fully verifies the active file (at most 10 MB) and the head record, and warns in the terminal if either is broken; rotated files are fully checked only by `/agent-org:audit-verify`. A specialist conflict is recorded as its `result` line with outcome `BLOCKED`. **Tamper-evident, not tamper-proof:** the model can still reach the files through Bash, behind a guard `ask`.
 
 ## Scope guard
 
@@ -104,6 +102,6 @@ In non-interactive runs (`claude -p`) an `ask` has no one to answer it, so the c
 - **The guard reads command text.** It can't see git aliases, scripts or Makefiles that run git themselves, interpreter one-liners (`python -c "os.system(...)"`), or commands built from variables (`$CMD push`). A quoted mention such as `echo "git push"` is correctly not treated as a command.
 - **The prompt hook is a nudge, not a gate.** Prompts that never mention a trigger rely on the rule card and the model's judgment.
 - **Bash edits aren't counted or attributed** (`sed -i`, redirects, scripts): the scope counter and the ledger see only Edit, Write and NotebookEdit.
-- **Citation checks miss paths built from variables or globs,** and check that a file was opened, not that it was read correctly.
-- **Teammate identity in hooks is unconfirmed,** so collision checks inside agent teams may be weaker than for subagents.
+- **Citation checks miss paths built from variables or globs** and bare-path mentions, and check that a file was opened or seen, not that it was read correctly.
+- **Teammates without a dispatch record** (the mapping failed) fall back to v0.1 checks; the `git diff` comparison against "Owns" remains.
 - **Connector text can appear inside tool output.** Agents treat it as data, not instructions.

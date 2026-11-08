@@ -11,8 +11,12 @@
 //   5. (v0.2) Audit and state protection: `ask` on tool calls that touch ~/.agent-org/audit or /state (C2, D27).
 //   6. (v0.2) Scope growth: `ask` when the main thread grows past ~3 files, or edits a risky path of a kind
 //      it hasn't edited yet, in a repo with no approval recorded for this session (D28).
+//   7. (v0.2c) Teammates: an ask-list command from a teammate is denied, not asked (D30): teammates run in
+//      permissionMode "auto" even under a default-mode lead, so an ask may never reach the user.
+// Agent identity goes through effectiveType() (v0.2c, F1): teammate hooks carry agent_type = the teammate's
+// name, and the dispatch record maps their agent_id back to the agent-org type.
 // Decisions combine: any deny wins, else any ask (reasons joined). It never returns `allow`.
-// Rules 3, 4 and 6 read session state and fail open when it is missing or unreadable.
+// Rules 3, 4, 6 and 7 (and teammate identity) read session state and fail open when it is missing or unreadable.
 // Dependency-free and fail-open: any error produces no output and exit code 0.
 // Never logs tool inputs. Debug logging (AGENT_ORG_HOOK_DEBUG=1) records the tool name, agent_type,
 // the decision and the matched rule name only.
@@ -22,7 +26,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  appendLedger, approvalFor, home, isUnder, orgSubdir, readLedger, readState, realpathLoose, resolvePath,
+  appendLedger, approvalFor, effectiveType, home, isTeammate, isUnder, orgSubdir, readLedger, readState,
+  realpathLoose, resolvePath,
 } from './lib/state.mjs';
 import { repoOfFile, repoName, repoRoot } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
@@ -322,9 +327,14 @@ export function decide(payload, state = null) {
   if (!payload || typeof payload !== 'object') return null;
   const tool = payload.tool_name;
   const input = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input : {};
-  const agentType = typeof payload.agent_type === 'string' && payload.agent_type ? payload.agent_type : null;
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : undefined;
   const session = state && state.session && typeof state.session === 'object' ? state.session : null;
+  let agentType = typeof payload.agent_type === 'string' && payload.agent_type ? payload.agent_type : null;
+  let teammate = false;
+  try {
+    agentType = effectiveType(payload, session) || agentType;
+    teammate = isTeammate(payload, session);
+  } catch { /* fail open: v0.1 identity */ }
   const ledger = state && Array.isArray(state.ledger) ? state.ledger : null;
   const asks = [];
   const denies = [];
@@ -334,7 +344,12 @@ export function decide(payload, state = null) {
   // v0.1: command ask list.
   if (tool === 'Bash' || tool === 'PowerShell') {
     const rule = analyzeCommand(input.command, tool === 'Bash');
-    if (rule) asks.push({ rule, reason: `agent-org guard: this command matches the ask list (${rule}). Confirm before it runs.` });
+    if (rule && teammate) {
+      // v0.2c: a teammate's ask may never reach the user (permissionMode "auto"); deny instead.
+      denies.push({ rule: `teammate-ask-list: ${rule}`, reason: `agent-org guard: teammates may not run ${rule}. Report it to the lead; the lead asks the user.` });
+    } else if (rule) {
+      asks.push({ rule, reason: `agent-org guard: this command matches the ask list (${rule}). Confirm before it runs.` });
+    }
   }
 
   // v0.1: QA may only edit test paths.

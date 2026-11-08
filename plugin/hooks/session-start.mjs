@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// agent-org SessionStart hook: adds rule-card.md to the session as context and (v0.2, C2) runs the
-// incremental audit check. Output is one JSON object: hookSpecificOutput.additionalContext carries the
+// agent-org SessionStart hook: adds rule-card.md to the session as context and (v0.2, C2) runs a full
+// verify of each repo's active audit file plus its head record (v0.2c, F3; rotated files are checked only
+// by /agent-org:audit-verify). Output is one JSON object: hookSpecificOutput.additionalContext carries the
 // rule card; a broken audit chain or head record adds a top-level systemMessage warning for the user.
 // Dependency-free and fail-open: any error produces no output (or the rule card only) and exit code 0.
 

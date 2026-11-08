@@ -56,10 +56,11 @@ export function toolCalls(entries) {
   return calls;
 }
 
-export function turnStartIndex(entries) {
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i];
-    if (e.type === 'user' && !e.isMeta && e.message && typeof e.message.content === 'string') return i;
+const isTurnStart = (e) => e.type === 'user' && !e.isMeta && e.message && typeof e.message.content === 'string';
+
+export function turnStartIndex(entries, before = entries.length) {
+  for (let i = Math.min(before, entries.length) - 1; i >= 0; i--) {
+    if (isTurnStart(entries[i])) return i;
   }
   return -1;
 }
@@ -74,6 +75,14 @@ export function turnStartedFromNotification(entries) {
 export function toolCallsInTurn(entries) {
   const start = turnStartIndex(entries);
   return toolCalls(entries).filter((c) => c.entryIndex > start);
+}
+
+// v0.2c: the turn before the current one (a summary turn may restate its evidence).
+export function toolCallsInPreviousTurn(entries) {
+  const start = turnStartIndex(entries);
+  if (start < 0) return [];
+  const prev = turnStartIndex(entries, start);
+  return toolCalls(entries).filter((c) => c.entryIndex > prev && c.entryIndex < start);
 }
 
 export const succeeded = (c) => c.isError === false;
@@ -137,6 +146,29 @@ export function filesOpenedInSession(entries, cwd) {
     } else if (isShell(c) && typeof c.input.command === 'string') {
       for (const f of shellReadFiles(c.input.command, c.name === 'Bash')) out.add(path.resolve(base, f));
     }
+  }
+  return out;
+}
+
+// v0.2c (F2): file paths seen in successful tool output count as seen for the citation check: Grep and
+// Glob results and Bash/PowerShell output (`path:line:` or a path at a line start, plus path-like tokens with
+// a file extension anywhere in the output, e.g. a file name printed by audit-verify.mjs). Paths with a
+// directory part are resolved against the call's cwd; bare file names are returned as is.
+const OUT_TOKEN = /(?<![\w@/.~-])((?:~|\.{1,2})?[\\/]?(?:[\w@.+-]+[\\/])*[\w@+-][\w@.+-]*\.[A-Za-z][A-Za-z0-9]{0,9})(?=$|[\s:,;)\]'"`>])/gm;
+const LINE_START = /^\s*((?:~|\.{1,2})?[\\/]?(?:[\w@.+-]+[\\/])+[\w@.+-]+)(?::\d+[:-]|\s*$)/gm;
+export function filesSeenInOutput(entries, cwd) {
+  const out = new Set();
+  for (const c of toolCalls(entries)) {
+    if (!succeeded(c) || !['Grep', 'Glob', 'Bash', 'PowerShell'].includes(c.name) || !c.resultText) continue;
+    const base = c.cwd || cwd || process.cwd();
+    const text = c.resultText.length > 2_000_000 ? c.resultText.slice(0, 2_000_000) : c.resultText;
+    const add = (p) => {
+      if (!p || /^\d/.test(p) || /^[a-z][a-z0-9+.-]*:\/\//i.test(p)) return;
+      if (/[\\/]/.test(p)) out.add(path.resolve(base, p.startsWith('~') ? p.replace(/^~/, process.env.HOME || '~') : p));
+      else out.add(p);
+    };
+    for (const m of text.matchAll(OUT_TOKEN)) add(m[1]);
+    for (const m of text.matchAll(LINE_START)) add(m[1]);
   }
   return out;
 }

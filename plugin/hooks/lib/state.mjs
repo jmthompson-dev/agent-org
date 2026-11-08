@@ -1,7 +1,7 @@
 // agent-org: per-session state (D26, D28; P5 D1, D2, D5).
 //   ~/.agent-org/state/<session_id>/state.json   {approvals: [{repo, intent, mode, approvedAt}],
 //                                                 scope: {<repo>: [files]},
-//                                                 dispatch: {<agentId>: {promptId, toolUseId, agentType}},
+//                                                 dispatch: {<agentId>: {promptId, toolUseId, agentType, teammate}},
 //                                                 finished: {<agentId>: ts}, riskySeen: {<repo>: [kinds]}}
 //   ~/.agent-org/state/<session_id>/ledger.jsonl  {ts, agent_id, agent_type, file[, collision, tool_use_id]}
 // Metadata only, never content. Writes go through the lock; JSON updates are temp file plus rename.
@@ -102,6 +102,24 @@ export function readLedger(sessionId) {
     try { const r = JSON.parse(l); if (r && typeof r === 'object') out.push(r); } catch { /* skip */ }
   }
   return out;
+}
+
+// The agent-org type behind a hook payload (v0.2c, F1). Teammate hooks carry a stable agent_id but
+// agent_type = the teammate's name (Phase 6 Part B step 3), so the dispatch record maps it back.
+export function effectiveType(payload, state) {
+  const t = payload && typeof payload.agent_type === 'string' && payload.agent_type ? payload.agent_type : null;
+  if (t && t.startsWith('agent-org:')) return t;
+  const id = payload && typeof payload.agent_id === 'string' ? payload.agent_id : null;
+  const rec = id && state && state.dispatch && typeof state.dispatch === 'object' ? state.dispatch[id] : null;
+  if (rec && typeof rec.agentType === 'string' && rec.agentType) return rec.agentType;
+  return t;
+}
+
+// True when the payload's agent was spawned as a teammate (dispatch record `teammate: true`).
+export function isTeammate(payload, state) {
+  const id = payload && typeof payload.agent_id === 'string' ? payload.agent_id : null;
+  const rec = id && state && state.dispatch && typeof state.dispatch === 'object' ? state.dispatch[id] : null;
+  return Boolean(rec && rec.teammate === true);
 }
 
 // The approval recorded for a repo in this session (latest wins), or null.

@@ -1,7 +1,7 @@
 // agent-org: hash-chained, rotated, tamper-evident audit log (C1, C2, D27; P5 C5).
 //   ~/.agent-org/audit/<repo>.jsonl          active file; one JSON object per line
 //   ~/.agent-org/audit/<repo>.jsonl.<n>      rotated files, oldest first (log-rotation style: no repo name can clash)
-//   ~/.agent-org/state/audit-<repo>.head     {file, index, rotated, lines, bytes, lastHash, checkpoint: {offset, line, hash}}
+//   ~/.agent-org/state/audit-<repo>.head     {file, index, rotated, lines, bytes, lastHash}
 // Each line carries `prev` (the previous line's `h`) and `h` = sha256(prev + canonical(line without h)).
 // The chain runs across rotated files. Appends and head updates happen in one locked section.
 // Metadata only: never prompt text, commands, message bodies, file content or report text.
@@ -17,7 +17,8 @@ export const auditRoot = () => path.join(orgDir(), 'audit');
 export const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const GENESIS = '';
 
-export const EVENTS = new Set(['dispatch', 'result', 'collision', 'guard-deny', 'conflict', 'claim-flag',
+// No separate `conflict` event (v0.2c, F5): a `result` line with outcome BLOCKED is the conflict record.
+export const EVENTS = new Set(['dispatch', 'result', 'collision', 'guard-deny', 'claim-flag',
   'team-task-created', 'team-task-completed', 'teammate-idle', 'message']);
 
 // Keep repo names usable as file names on every OS.
@@ -101,8 +102,9 @@ export function append(repo, fields) {
     if (!head) {
       const t = scanTail(file);
       head = { file: activeName(repo), index: rotatedFiles(repo, null).length, rotated: rotatedFiles(repo, null),
-        lines: t.lines, bytes: t.bytes, lastHash: t.lastHash, checkpoint: null };
+        lines: t.lines, bytes: t.bytes, lastHash: t.lastHash };
     }
+    delete head.checkpoint; // v0.2c (F3): verify always walks whole files
     if (!Array.isArray(head.rotated)) head.rotated = rotatedFiles(repo, null);
     const rec = { ts: new Date().toISOString(), repo: String(repo) };
     for (const [k, v] of Object.entries(fields || {})) if (v !== undefined && v !== null && k !== 'prev' && k !== 'h') rec[k] = v;
@@ -124,7 +126,6 @@ export function append(repo, fields) {
       head.index = n;
       head.lines = 0;
       head.bytes = 0;
-      head.checkpoint = { offset: 0, line: 0, hash: rec.prev };
     }
     fs.appendFileSync(file, line);
     head.file = activeName(repo);
@@ -136,19 +137,21 @@ export function append(repo, fields) {
   });
 }
 
-// Walks lines of one file from a byte offset. Returns {ok, lines, bytes, last, breakAfterLine}.
-function walk(file, prev, startOffset = 0, startLine = 0) {
+// Walks every line of one file. `prev` null means "trust the first line's prev" (the active file checked
+// on its own at session start). Returns {ok, lines, bytes, last, breakAfterLine}; breakAfterLine is the
+// count of good lines before the bad one, so the break is between 1-based lines N and N+1.
+function walk(file, prev) {
   let buf;
-  try { buf = fs.readFileSync(file); } catch { return { ok: false, missing: true, lines: startLine, bytes: 0, last: prev, breakAfterLine: startLine }; }
-  if (startOffset > buf.length) return { ok: false, lines: startLine, bytes: buf.length, last: prev, breakAfterLine: startLine };
-  const text = buf.subarray(startOffset).toString('utf8');
-  let line = startLine;
+  try { buf = fs.readFileSync(file); } catch { return { ok: false, missing: true, lines: 0, bytes: 0, last: prev, breakAfterLine: 0 }; }
+  const text = buf.toString('utf8');
+  let line = 0;
   let last = prev;
   const parts = text.split('\n');
   if (parts.length && parts[parts.length - 1] === '') parts.pop();
   for (const l of parts) {
     let rec;
     try { rec = JSON.parse(l); } catch { return { ok: false, lines: line, bytes: buf.length, last, breakAfterLine: line }; }
+    if (last === null && rec && typeof rec === 'object') last = rec.prev ?? GENESIS;
     if (!rec || typeof rec !== 'object' || (rec.prev ?? GENESIS) !== last || hashLine(rec) !== rec.h) {
       return { ok: false, lines: line, bytes: buf.length, last, breakAfterLine: line };
     }
@@ -160,9 +163,9 @@ function walk(file, prev, startOffset = 0, startLine = 0) {
 
 // verify(repo, {full}) → {ok, file, breakAfterLine, headMismatch, lines, files, noHead}
 // Full: every rotated file in order, then the active file, then the head record.
-// Incremental: from the head's checkpoint in the active file; moves the checkpoint forward on success
-// (unless readOnly, as audit-verify.mjs uses it).
-export function verify(repo, { full = false, readOnly = false } = {}) {
+// Not full (session start, v0.2c F3): the whole active file, chained from its own first line, then the
+// head record. Rotated files are checked only in full mode. Never writes anything.
+export function verify(repo, { full = false } = {}) {
   const dir = auditRoot();
   const active = path.join(dir, activeName(repo));
   const head = readHead(repo);
@@ -172,12 +175,9 @@ export function verify(repo, { full = false, readOnly = false } = {}) {
     if (head && Number(head.lines) > 0) return { ok: false, file: activeName(repo), headMismatch: true, lines: 0, files: 0 };
     return { ok: true, absent: true, lines: 0, files: 0 };
   }
-  let prev = GENESIS;
+  let prev = full ? GENESIS : null;
   let total = 0;
-  let cp = head && head.checkpoint && Number.isFinite(head.checkpoint.offset) ? head.checkpoint : null;
-  const incremental = !full && cp;
-
-  if (!incremental) {
+  if (full) {
     for (const f of rotated) {
       const r = walk(path.join(dir, f), prev);
       if (!r.ok) return { ok: false, file: f, breakAfterLine: r.breakAfterLine, lines: total + r.lines, files: rotated.length + 1 };
@@ -185,7 +185,7 @@ export function verify(repo, { full = false, readOnly = false } = {}) {
       total += r.lines;
     }
   }
-  const r = incremental ? walk(active, cp.hash ?? GENESIS, cp.offset, Number(cp.line) || 0) : walk(active, prev);
+  const r = walk(active, prev);
   if (!r.ok) {
     if (r.missing && !activeExists && head && Number(head.lines) === 0) {
       // Rotated just before a new active file was written: nothing to compare.
@@ -194,22 +194,12 @@ export function verify(repo, { full = false, readOnly = false } = {}) {
     }
   }
   total += r.lines;
-  const files = rotated.length + (activeExists ? 1 : 0);
+  const files = (full ? rotated.length : 0) + (activeExists ? 1 : 0);
   if (!head) return { ok: true, noHead: true, lines: total, files };
-  if (Number(head.lines) !== r.lines || Number(head.bytes) !== r.bytes || (head.lastHash || GENESIS) !== r.last) {
+  const last = r.last ?? GENESIS;
+  if (Number(head.lines) !== r.lines || Number(head.bytes) !== r.bytes || (head.lastHash || GENESIS) !== last) {
     return { ok: false, file: activeName(repo), headMismatch: true, lines: total, files };
   }
-  if (readOnly) return { ok: true, lines: total, files };
-  // Move the checkpoint forward (under the lock; another append may have landed meanwhile).
-  try {
-    withLock(active, () => {
-      const h = readHead(repo);
-      if (h && h.lastHash === r.last) {
-        h.checkpoint = { offset: r.bytes, line: r.lines, hash: r.last };
-        writeHead(repo, h);
-      }
-    });
-  } catch { /* checkpoint is an optimization */ }
   return { ok: true, lines: total, files };
 }
 
