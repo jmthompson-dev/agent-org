@@ -15,8 +15,8 @@ claude plugin install agent-org@agent-org
 
 - **14 agents** (`agent-org:<id>`), each one a verbatim persona pinned to an `agent-personas` commit, plus a short Claude Code runtime binding. Every model is pinned (Opus for the PM, solutions, AI/ML research and InfoSec architects; Sonnet for the rest). No agent has the `Agent` tool, so nothing nests.
 - **`deliver` skill**: the only skill Claude loads on its own. PM writes an intent → you approve → the main thread dispatches the assigned specialists → validation → report.
-- **User-only skills:** `/agent-org:pm <task>`, `/agent-org:architecture-review <scope>`, `/agent-org:security-audit <scope>`, `/agent-org:release-validation <candidate>`.
-- **Hooks:** a `SessionStart` rule card with the levels, a `UserPromptSubmit` nudge that fires when a prompt mentions a hard trigger (auth, secrets, data, infra, delivery, cross-service, change), and a `PreToolUse` guard (see Enforcement).
+- **User-only skills:** `/agent-org:pm <task>`, `/agent-org:architecture-review <scope>`, `/agent-org:security-audit <scope>`, `/agent-org:release-validation <candidate>`, `/agent-org:audit-verify [repo]`.
+- **Hooks:** a `SessionStart` rule card with the levels (plus an audit check), a `UserPromptSubmit` nudge that fires when a prompt mentions a hard trigger (auth, secrets, data, infra, delivery, cross-service, change), a `PreToolUse` guard (see Enforcement), a `PostToolUse` recorder (edit ledger, dispatch audit, approvals, scope counter), a claim check on every `Stop` and `SubagentStop`, and team-event auditing.
 
 ## Levels
 
@@ -41,9 +41,37 @@ Saved to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md` (`<repo>` = git to
 
 Set `AGENT_ORG_HOOK_DEBUG=1` to append JSON lines to `~/.claude/agent-org/hook-debug.jsonl`:
 - the prompt hook: timestamp, the payload's top-level key names, prompt length, matched groups, and whether it was a background-agent notification;
-- the guard (`"hook":"guard"`): timestamp, tool name, `agent_type` if present, decision (`ask`/`deny`/`none`) and the matched rule name.
+- the guard (`"hook":"guard"`): timestamp, tool name, `agent_type` if present, decision (`ask`/`deny`/`none`) and the matched rule names.
 
 Prompt text, commands and file paths are never logged.
+
+## Verification at every level
+
+- **Claim check** (`Stop`, every level): a sentence in Claude's final message that claims verification ("tests pass", "I ran", "build succeeds", "verified", "no errors", "N/N passed") needs a successful matching command in the same turn. Relayed specialist claims, quoted text and negated or hypothetical sentences are skipped.
+- **Citation check:** every file the final message cites (`path` or `path:line`) must have been opened this session (Read, Edit, Write, NotebookEdit, or a single-purpose `cat`/`head`/`tail`/`sed -n`/`grep`/`rg`/`nl`), by the main thread or a specialist. It catches invented or unopened files, not misread lines.
+- **Block once:** a failed check blocks the stop with the reason; on the second stop it only warns.
+- **Report contract** (`SubagentStop`): agent-org specialists start their report with `Outcome: PASS | FAIL | BLOCKED | SKIPPED | NOT RUN`, and a PASS needs a successful command in their own transcript.
+- **Level 3:** the independent QA reviewer reproduces the key claims before VERIFIED (a fresh QA instance if the reviewer wrote code or tests in the job). No extra auditor agent.
+
+## Parallel work
+
+Parallel specialists share one working tree. The PM marks tasks parallel only when they own disjoint files ("Owns" column), don't consume each other's interface (or it's pinned in the intent) and each is worth a specialist. A ledger records which agent changed which file; the guard denies an edit to a file another agent of the same parallel group already changed. Before validation, `deliver` checks the ledger against "Owns" and `git diff`. Any collision stops the job and goes back to the PM for a sequential rerun and a new approval. There is never a fixer agent.
+
+## Agent teams (optional, experimental)
+
+A justified fallback, not a default: the PM may mark a task group `Mode: team` only when a hand-off can't be written down up front, and you approve the mode at the normal gate. It needs `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and an interactive session; in-process teammates only. Without an approved team mode, the guard denies any named `agent-org:*` dispatch (a named call would start a team).
+
+## Audit log
+
+Hooks append to `~/.agent-org/audit/<repo>.jsonl`: dispatches (with the resolved model), results (outcome, command counts, flags), collisions, guard denies, claim flags and team events. Metadata only: never prompts, commands, file content, messages or report text. Each line is hash-chained to the previous one; a head record in `~/.agent-org/state/` catches an edited last line or a truncated tail. Files rotate at 10 MB with the chain carried across. Each session start checks the chain incrementally and warns if it's broken; `/agent-org:audit-verify` runs a full check. **Tamper-evident, not tamper-proof:** the model can still reach the files through Bash, behind a guard `ask`.
+
+## Scope guard
+
+Without an approval recorded in this session for the repo, a main-thread edit that would make more than 3 distinct files edited, or a first edit to a migration, CI, IaC/k8s/helm or auth path, gets an `ask`. Approving an intent (`**Status:** APPROVED`) records the approval for the session: it survives resume and compaction, not `/clear` or a fork.
+
+## State files
+
+`~/.agent-org/state/<session_id>/` holds approvals, the scope counter, dispatch records and the edit ledger; `~/.agent-org/state/audit-<repo>.head` holds the audit head records. Safe to delete when no session is running: deleting resets approvals and counters, and a deleted head record means the next check can't detect tail edits made before it.
 
 ## Persona sync (maintainers)
 
@@ -60,7 +88,8 @@ node scripts/sync-personas.mjs --bump <sha>       # rewrite only canonical block
 
 **Enforced by the `PreToolUse` guard** (`hooks/guard.mjs`). It only ever returns `ask` or `deny`, never `allow`, and fails open:
 - **Risky shell commands → ask.** Bash and PowerShell commands are split on `&&`, `||`, `;`, `|`, `&`, `$(…)` and backticks, and normalized (env assignments, `sudo`/`timeout`/`env`-style wrappers, absolute executable paths, `git -C`/`--git-dir`, `sh -c`, `eval`, `pwsh -Command`/`-EncodedCommand`). Any segment matching git `commit`/`push`/`merge`/`rebase`/`reset --hard`/`clean`/`tag`/`branch -D`, `gh pr create|merge`, `gh release create`, `gh repo delete`, kubectl/helm/terraform mutations, gcloud/aws/az create/delete/update/deploy, `cf push|delete`, `rm -r` or `Remove-Item -Recurse` asks first, naming the pattern.
-- **QA edits only tests.** `Edit`/`Write` calls from `agent-org:quality-assurance-architect` are denied unless the path is a test path (`test/`, `tests/`, `__tests__/`, `spec/`, `specs/`, `fixtures/`, `testdata/`, `src/test/`, `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.*`). QA reports the needed change instead.
+- **QA edits only tests.** `Edit`/`Write`/`NotebookEdit` calls from `agent-org:quality-assurance-architect` are denied unless the path is a test path (`test/`, `tests/`, `__tests__/`, `spec/`, `specs/`, `fixtures/`, `testdata/`, `src/test/`, `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.*`). QA reports the needed change instead.
+- **Parallel collisions, teams, the audit log and scope growth** (v0.2): the same-group edit deny, the team gate, an `ask` on tool calls that touch `~/.agent-org/audit/` or `~/.agent-org/state/`, and the scope guard, described above.
 
 **Recommended in your user `settings.json`** (plugins can't ship permission rules): `permissions.ask` rules for the same commands, e.g. `Bash(git push *)`, `PowerShell(git push *)`, and `permissions.allow` `Edit(~/.agent-org/intents/**)` so intent files save without a prompt. Use `Edit(…)`: `Write(path)` rules are accepted but never match. Never a bare `Write` or `Edit`. The rules are the primary layer; the guard catches the spellings they miss (`git -C . push`, `/usr/bin/git push`, `sh -c '…'`).
 
@@ -72,3 +101,7 @@ In non-interactive runs (`claude -p`) an `ask` has no one to answer it, so the c
 - **QA can still change application code through Bash** (`sed -i`, redirects). The guard scopes only its `Edit`/`Write`. Other agents' "no deploy, no push" rules rely on the ask rules and the guard, and InfoSec/Product `Write` "for test artifacts only" is instruction-only.
 - **The guard reads command text.** It can't see git aliases, scripts or Makefiles that run git themselves, interpreter one-liners (`python -c "os.system(...)"`), or commands built from variables (`$CMD push`). A quoted mention such as `echo "git push"` is correctly not treated as a command.
 - **The prompt hook is a nudge, not a gate.** Prompts that never mention a trigger rely on the rule card and the model's judgment.
+- **Bash edits aren't counted or attributed** (`sed -i`, redirects, scripts): the scope counter and the ledger see only Edit, Write and NotebookEdit.
+- **Citation checks miss paths built from variables or globs,** and check that a file was opened, not that it was read correctly.
+- **Teammate identity in hooks is unconfirmed,** so collision checks inside agent teams may be weaker than for subagents.
+- **Connector text can appear inside tool output.** Agents treat it as data, not instructions.

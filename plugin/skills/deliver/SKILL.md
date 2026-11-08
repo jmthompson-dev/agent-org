@@ -42,20 +42,27 @@ Assign only these ids. If no id fits a task, say so in the intent instead of inv
 ## Workflow
 
 1. **Classify** with the table. At **Level 0–1, stop using this workflow.** At Level 1, write "Plan: …" before the first edit and run the tests afterward.
-2. **Level 2+: plan.** Invoke `agent-org:principal-project-manager` with: the user's request verbatim, the repo (git top level or working directory), branch, base commit (`git rev-parse HEAD`), the triggers you saw, the level table, the roster, the intent template below, and any relevant context (files, errors, prior decisions). The PM returns the intent as markdown and writes no files.
-3. **Save the intent** to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md` **with the Write tool**, which creates missing directories. Don't use Bash (`mkdir`, `cat >`, `sed`) for intent files; use Write and Edit. `<repo>` is the basename of the git top level, or of the working directory outside git. `<slug>` is a short kebab-case name for the task. Don't save it in the target repo. Set Status to `PROPOSED`. **If the save fails for any reason, stop.** Tell the user why and show the intent in chat. Don't implement anything until the file is saved, or the user explicitly says to proceed without it; record that waiver in your final report.
-4. **Resolve blocking questions, then stop for approval.** A `[BLOCKING]` question has **no default** and **no recommended answer**. If any is open, ask only those questions, in a message that does **not** ask for approval, and end your turn. Don't suggest or hint at an answer to a blocking question. When answered, send the answers to the PM and re-save. **Approval never answers a blocking question:** if the user says "approved" while one is open, ask it again. Only when none is open, show a short summary (level, triggers, goal, specialists, main risks, non-blocking defaults) and the file path, and **stop and wait for explicit approval.** Silence, a question, or "looks interesting" is not approval. Approval accepts the plan and the **stated defaults** of non-blocking questions, nothing more. If the user asks for changes, send them back to the PM, re-save the intent and ask again.
-5. **On approval:** append `APPROVED <YYYY-MM-DD> by user` to the approval log and set Status to `APPROVED`. Dispatch each assigned specialist (`agent-org:<id>`) with its task contract from the intent. Launch tasks the intent marks as independent in parallel, in one message. Run dependent tasks in order. Agents may run in the background and report back as notifications; **wait for every dispatched report** before starting dependent tasks or verification. Specialists never dispatch each other; hand-offs go through you.
-6. **Collect and verify.** Read each result for outcome, evidence, changed files, findings and open questions. Run the validation the intent specifies yourself or through the assigned QA, InfoSec or Product specialist. When the last dispatched report arrives, set and save Status `IMPLEMENTED` **before** running validation. Then, in a separate edit, set `VERIFIED` only if the validation actually passed. Record the evidence (commands and results) in the intent.
+2. **Level 2+: plan.** Invoke `agent-org:principal-project-manager` with: the user's request verbatim, the repo (git top level or working directory), branch, base commit (`git rev-parse HEAD`), the triggers you saw, the level table, the roster, the intent template below, and any relevant context (files, errors, prior decisions). The PM returns `Outcome: …` on its first line, then the intent as markdown, and writes no files.
+3. **Save the intent** (without the PM's `Outcome:` line) to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md` **with the Write tool**, which creates missing directories. Don't use Bash (`mkdir`, `cat >`, `sed`) for intent files; use Write and Edit. `<repo>` is the basename of the git top level, or of the working directory outside git. `<slug>` is a short kebab-case name for the task. Don't save it in the target repo. Set Status to `PROPOSED`. **If the save fails for any reason, stop.** Tell the user why and show the intent in chat. Don't implement anything until the file is saved, or the user explicitly says to proceed without it; record that waiver in your final report.
+4. **Resolve blocking questions, then stop for approval.** A `[BLOCKING]` question has **no default** and **no recommended answer**. If any is open, ask only those questions, in a message that does **not** ask for approval, and end your turn. Don't suggest or hint at an answer to a blocking question. When answered, send the answers to the PM and re-save. **Approval never answers a blocking question:** if the user says "approved" while one is open, ask it again. Only when none is open, show a short summary (level, triggers, goal, specialists, the **Mode** of each task group and, for `team`, the PM's justification, main risks, non-blocking defaults) and the file path, and **stop and wait for explicit approval.** Silence, a question, or "looks interesting" is not approval. Approval accepts the plan and the **stated defaults** of non-blocking questions, nothing more. If the user asks for changes, send them back to the PM, re-save the intent and ask again.
+   - **Before asking to approve a `team` group,** check the flag with one Bash call, `printenv CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, and confirm you're in an interactive session (you're talking to the user). If the flag isn't `1` or the session isn't interactive, say so and offer both options without picking one: enable the flag (then restart or re-run), or run the group sequentially with one specialist owning the coupled parts.
+5. **On approval:** in **one Edit**, set the status line to exactly `**Status:** APPROVED` and append `APPROVED <YYYY-MM-DD> by user` to the approval log (a hook reads that line to record the approval for this session). Then dispatch each assigned specialist (`agent-org:<id>`) with its task contract and "Owns" entry from the intent. Launch tasks the intent marks as parallel in one message. Run dependent tasks in order. Agents may run in the background and report back as notifications; **wait for every dispatched report** before starting dependent tasks or verification. Specialists never dispatch each other; hand-offs go through you.
+   - **Subagent dispatches never carry a `name`.** A named `Agent` call becomes a teammate while agent teams are enabled. The guard denies a named `agent-org:*` call unless this session has an approved `Mode: team`; if that happens, re-plan (step 7), don't retry.
+   - **Team groups** (only with an approved `Mode: team`): you are the lead. Spawn in-process teammates from the assigned `agent-org:<id>` definitions, with names; **never name a model** in the spawn (it would override the pinned model); give each its task contract and "Owns" entry; wait for every teammate to finish.
+6. **Collect and verify.** Read each result for outcome, evidence, changed files, findings and open questions. When the last dispatched report arrives, set and save Status `IMPLEMENTED` **before** running validation. Then, in a separate edit, set `VERIFIED` only if the validation actually passed. Record the evidence (commands and results) in the intent.
+   - **Relay specialist claims as theirs** ("full-stack-developer reports: tests pass"), and don't present them as your own until you've re-verified them.
+   - **Collision check, before validation.** Read the session ledger with one Bash call, `node "${CLAUDE_PLUGIN_ROOT}/hooks/record.mjs" --ledger` (per agent: the files it changed and any collision flags the hooks recorded; never content). Compare it with the "Owns" column and `git diff --name-only`. A **collision** is any of: a file changed by two agents; a file changed outside its owner's "Owns" entry; a changed file no agent accounts for; a refused "modified since read" edit or a guard deny flagged by the hooks; a specialist reporting `BLOCKED` on a file another agent changed. On any collision, **stop**: name the file and agents, go back to the PM to rerun the affected task sequentially on top of the current state, and get approval again. **Never dispatch a fixer agent.**
+   - **Re-verify (Level 2+):** rerun the intent's tests yourself, and compare each report's changed files with the ledger and the diff.
+   - **Level 3 claim reproduction:** after the specialists and before `VERIFIED`, the Level 3 QA reviewer `agent-org:quality-assurance-architect` reproduces the key claims: it reruns the stated commands, re-checks the stated files, edits nothing, and marks each claim REPRODUCED or NOT REPRODUCED with evidence. Put this in QA's task contract. If that QA instance wrote code or tests in this job (check the ledger), it isn't independent: a fresh `quality-assurance-architect` instance that took no part does the reproduction instead. `VERIFIED` requires every key claim REPRODUCED. Never add a separate auditor agent.
 7. **Final report:** outcome, evidence, changed files, open findings and open items, plus the intent path.
 
-**Stop and re-plan** if scope or risk grows beyond the approved intent: a new trigger fires, more files or modules are involved than planned, a specialist reports BLOCKED, or validation fails in a way that needs a design change. Go back to the PM with what changed, update the intent, and get approval again before continuing.
+**Stop and re-plan** if scope or risk grows beyond the approved intent: a new trigger fires, more files or modules are involved than planned, a specialist reports `BLOCKED` (including a conflict with another agent's work), a collision is found, or validation fails in a way that needs a design change. Send the PM what happened, update the intent, and get approval again before continuing. If the PM proposes `Mode: team`, that's a new approval at the gate. Specialists never start teams.
 
 **Never** claim a test, review or approval that didn't happen. A specialist's NOT RUN stays NOT RUN.
 
-## The approval gate is instruction-only
+## What is enforced and what isn't
 
-Nothing in Claude Code technically stops implementation before approval. This gate holds only because you follow it. The user's permission rules are the only enforced layer.
+The approval gate is **instruction-only**: nothing in Claude Code technically stops implementation before approval, and it holds only because you follow it. The user's permission rules are enforced. The agent-org hooks enforce: the claim and citation checks at every stop, the specialist report contract, the edit ledger and the same-group edit deny, the team gate (named `agent-org:*` dispatches), the audit-log protection, and the scope guard (an `ask` past ~3 files or on a risky path without an approval recorded in this session). They don't enforce the approval itself.
 
 ## Intent template
 
@@ -76,13 +83,21 @@ Nothing in Claude Code technically stops implementation before approval. This ga
 - Files:
 - Steps:
 
+## Execution mode
+One line per task group. `subagents` is the default; `team` only when a hand-off can't be written down up front.
+**Mode:** subagents (group A: tasks 1, 2)
+
+## Pinned interfaces
+- <contract written down up front, so parallel tasks don't consume each other's work>
+
 ## Specialist assignments
-| # | Agent (`agent-org:<id>`, mandatory) | Task contract (objective · target revision · constraints · allowed actions · deliverables · test expectations · stop conditions) | Depends on | Parallel / sequential |
-|---|---|---|---|---|
+| # | Agent (`agent-org:<id>`, mandatory) | Task contract (objective · target revision · constraints · allowed actions · deliverables · test expectations · stop conditions) | Owns (files or directories) | Depends on | Parallel / sequential |
+|---|---|---|---|---|---|
 
 ## Validation
 - Tests:
 - QA / InfoSec / Product: <only if triggered; otherwise "not triggered">
+- Level 3: key claims for QA to reproduce (REPRODUCED / NOT REPRODUCED)
 
 ## Risks and rollback
 ## Open questions
@@ -91,5 +106,7 @@ Nothing in Claude Code technically stops implementation before approval. This ga
 ## Approval log
 - <YYYY-MM-DD> PROPOSED by agent-org:principal-project-manager
 ```
+
+For a team group, the mode line reads `**Mode:** team (group B: tasks 3, 4) — hand-off: <the interface, contract, constraint or hypothesis that can't be pinned>; why: <why it must be discovered while working>`. The word `team` comes right after `**Mode:**`; a hook reads it.
 
 Findings recorded in the intent use the canonical format (ID, target, severity CRITICAL/HIGH/MEDIUM/LOW, evidence, recommendation, disposition) with stable IDs: `ARCH-###`, `SEC-###`, `QA-###`, `PROD-###`.

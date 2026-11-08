@@ -1,5 +1,5 @@
 {
-  "description": "agent-org: escalation nudge on user prompts, a level rule card at session start, and a PreToolUse command and QA-scope guard",
+  "description": "agent-org: escalation nudge, level rule card and audit check at session start, a PreToolUse command, QA-scope, team, audit and scope guard, an edit ledger and dispatch audit, claim and citation checks at every stop, and team event auditing",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -25,11 +25,88 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|PowerShell|Edit|Write",
+        "matcher": "Bash|PowerShell|Edit|Write|NotebookEdit|Agent",
         "hooks": [
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.mjs\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "SendMessage",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/team-audit.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|Agent|SubagentHandback",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/record.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/claim-check.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/claim-check.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "TaskCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/team-audit.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/team-audit.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/team-audit.mjs\"",
             "timeout": 5
           }
         ]

@@ -45,7 +45,8 @@ Level 2 catches most real work, so the line between 1 and 2 is drawn by triggers
 - `<repo>` is the basename of the git top level, or of the working directory outside git.
 - The approval gate is an **instruction, not enforcement**. Nothing technically stops a model from skipping it. That gap is documented, not hidden.
 
-### D7. Agent teams are out of scope for v0.1 — Decided
+### D7. Agent teams are out of scope for v0.1 — Superseded by D30
+Superseded by D30: agent teams are a justified, approved and guard-enforced fallback in v0.2.
 They're off on this machine. With teams enabled, a named subagent becomes a teammate and teammates can't nest. D2 avoids depending on nesting, so turning teams on later doesn't break the design.
 
 ## Models
@@ -124,3 +125,28 @@ In `claude -p` runs, an `ask` from a rule or the guard has no one to answer, so 
 
 ### D24. Specialists write files with Edit/Write, not Bash — Decided
 Phase 4 G4b: a developer bundled `git checkout -b … && cat > file <<EOF … && npm test` into one Bash call, and one unapproved part blocked the whole call. Runtime bindings for every specialist with Bash now say: create and change files with Edit/Write, and keep each Bash call to one purpose.
+
+## v0.2
+
+### D25. Hallucination checks scale with the level and are hook-enforced from Level 0 — Decided; mechanism Verified (P5 P1a, P3)
+A1 (`Stop`, main thread) and A2 (`SubagentStop`, agent-org specialists) read `last_assistant_message`, require a successful matching tool call in the current turn for each verification claim, and check that every cited file was opened this session. Block once when `stop_hook_active` is false, then allow with a warning. Relayed claims are recognized by matching specialists' own reports. Fails open, logs no content, catches invented files, not misread lines. Tool-output instructions are data (A3).
+Verified in Phase 5: P5 A1–A8 (P1a, P3), `reports/05-inspect-v0.2-2026-11-08.md`.
+
+### D26. Parallel specialists share one tree; collisions are prevented where possible, detected always, and re-planned — Decided; mechanism Verified (P5 P2)
+Parallel only when B1 holds. A `PostToolUse` ledger keyed by `agent_id` attributes edits; the guard denies an edit to a file another agent of the same parallel group changed; the main thread detects the five collision shapes of B3. Response: stop, name file and agents, PM re-plans sequentially, user approves. No fixer agent. Edit for existing files.
+Verified in Phase 5: P5 B1–B5 (P2), `reports/05-inspect-v0.2-2026-11-08.md`.
+
+### D27. The audit log is hook-written, hash-chained, rotated and tamper-evident — Decided; locking and verification Verified (P5 local tests); `systemMessage` display Open (Phase 6)
+Dispatch from `PostToolUse(Agent)` with `resolvedModel`; result from `SubagentStop`. Locked appends, head record, rotation at 10 MB with the chain carried across files, incremental verify at SessionStart with a user warning, full verify on demand, guard `ask` on `~/.agent-org/audit/` and `~/.agent-org/state/`. Never content.
+Verified in Phase 5: P5 C1–C5, `reports/05-inspect-v0.2-2026-11-08.md`.
+
+### D28. The scope-growth guard is session-scoped and always asks — Decided; fields Verified (P5 D1–D5)
+Main-thread edits to more than ~3 files, or a first risky-path edit, with no approval recorded for this `session_id`, trigger `ask`. Approval is recorded by a `PostToolUse` hook; it survives resume and compaction, not `/clear` or a fork. Bash edits are a documented gap.
+Verified in Phase 5: P5 D1–D5, `reports/05-inspect-v0.2-2026-11-08.md`.
+
+### D29. At Level 3, the independent QA reviewer reproduces the key claims — Decided
+The Level 3 QA reviewer (already required by D5) also reproduces the key claims before VERIFIED: it reruns the stated commands, re-checks the stated files, edits nothing, and marks each claim REPRODUCED or NOT REPRODUCED with evidence. If that QA instance wrote code or tests in this job (it appears in the edit ledger), it isn't independent, so a fresh `quality-assurance-architect` instance that took no part does the reproduction instead. VERIFIED requires every key claim REPRODUCED. No separate auditor agent: a dedicated one would duplicate the Level 3 reviewers and need a persona that doesn't exist in agent-personas (D15). The no-edit rule is instruction-only (QA can still edit test paths). Acceptance in Phase 6.
+
+### D30. Agent teams are a justified fallback, gated by approval and enforced by the guard (supersedes D7) — Decided; docs Verified; teammate hook identity Open (Phase 6)
+Subagents by default; `Mode: team` only when a hand-off can't be pinned, justified in the intent and approved. The guard denies named `agent-org:*` dispatches without an approved team mode and sends the main thread back to re-plan. Requires the flag and an interactive session, otherwise both options are offered. In-process only; the lead never names a teammate model; strict "Owns"; B3 and the audit apply; conflicts escalate only through re-planning.
+Verified in Phase 5: P5 B3, F0–F6, `reports/05-inspect-v0.2-2026-11-08.md`.

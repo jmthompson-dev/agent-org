@@ -1,10 +1,17 @@
 #!/usr/bin/env node
-// agent-org PreToolUse guard (D12). Two jobs:
+// agent-org PreToolUse guard (D12; v0.2: D26–D28, D30). Jobs:
 //   1. Bash/PowerShell: return `ask` when any segment of the command, after normalization, matches the
 //      ask list. This closes the gaps that text-only ask rules leave (`git -C . push`, `/usr/bin/git push`,
 //      `sh -c '…'`, `FOO=1 kubectl apply`). The user's ask rules in settings.json stay the primary layer.
-//   2. Edit/Write by agent-org:quality-assurance-architect: `deny` anything that isn't a test path.
-// It only ever returns `ask` or `deny`, never `allow`, so it can't loosen anything.
+//   2. Edit/Write/NotebookEdit by agent-org:quality-assurance-architect: `deny` anything that isn't a test path.
+//   3. (v0.2) Same-group edit deny: an agent-org specialist may not edit a file another agent of the same
+//      parallel group (same dispatch prompt_id) already changed (B3, D26).
+//   4. (v0.2) Team gate: deny a named agent-org:* Agent call without an approved Mode: team (B4, D30).
+//   5. (v0.2) Audit and state protection: `ask` on tool calls that touch ~/.agent-org/audit or /state (C2, D27).
+//   6. (v0.2) Scope growth: `ask` when the main thread grows past ~3 files or first edits a risky path in a
+//      repo with no approval recorded for this session (D28).
+// Decisions combine: any deny wins, else any ask (reasons joined). It never returns `allow`.
+// Rules 3, 4 and 6 read session state and fail open when it is missing or unreadable.
 // Dependency-free and fail-open: any error produces no output and exit code 0.
 // Never logs tool inputs. Debug logging (AGENT_ORG_HOOK_DEBUG=1) records the tool name, agent_type,
 // the decision and the matched rule name only.
@@ -13,6 +20,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  appendLedger, approvalFor, home, isUnder, orgSubdir, readLedger, readState, realpathLoose, resolvePath,
+} from './lib/state.mjs';
+import { repoOfFile, repoName, repoRoot } from './lib/repo.mjs';
+import { append as auditAppend } from './lib/audit.mjs';
 
 const DEBUG_FILE = path.join(os.homedir(), '.claude', 'agent-org', 'hook-debug.jsonl');
 const QA_AGENT = 'agent-org:quality-assurance-architect';
@@ -220,6 +232,19 @@ export function analyzeCommand(command, posix = true, depth = 0, hits = new Set(
   return hits.size ? [...hits].join('; ') : null;
 }
 
+// Normalized word lists of every simple command in a command line, recursing into sh -c, eval and
+// pwsh -Command. Used by the transcript library to find single-purpose shell reads.
+export function commandSegments(command, posix = true, depth = 0, out = []) {
+  if (typeof command !== 'string' || depth > 8) return out;
+  for (const seg of splitCommand(command, posix, [])) {
+    const n = normalize(seg);
+    if (!n) continue;
+    if (n.script !== undefined) commandSegments(n.script, n.posix, depth + 1, out);
+    else out.push(n.words);
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------------------------
 // QA test-path scope
 
@@ -242,23 +267,170 @@ export function isTestPath(filePath, cwd) {
 // ---------------------------------------------------------------------------------------------
 // Hook plumbing
 
-export function decide(payload) {
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
+const QA_REASON = 'agent-org guard: quality-assurance-architect may only edit test files (test/, tests/, __tests__/, spec/, specs/, fixtures/, testdata/, src/test/, *.test.*, *.spec.*, *_test.*, test_*.*). Do not make this change; report it to the main thread as a finding instead.';
+
+const editTarget = (input) => (typeof input.file_path === 'string' && input.file_path) ? input.file_path
+  : (typeof input.notebook_path === 'string' && input.notebook_path ? input.notebook_path : null);
+
+// Any spelling of ~/.agent-org/audit or ~/.agent-org/state in a command: ~, $HOME, ${HOME},
+// %USERPROFILE%, $env:USERPROFILE or the absolute home path all end in `.agent-org/<dir>`.
+const PROTECTED_CMD = /\.agent-org[\\/]+(?:audit|state)(?![A-Za-z0-9_-])/i;
+
+export function touchesProtected(tool, input, cwd) {
+  if (EDIT_TOOLS.has(tool)) {
+    const p = resolvePath(editTarget(input), cwd);
+    if (!p) return false;
+    return [...orgSubdir('audit'), ...orgSubdir('state')].some((d) => isUnder(p, d));
+  }
+  if ((tool === 'Bash' || tool === 'PowerShell') && typeof input.command === 'string') {
+    return PROTECTED_CMD.test(input.command);
+  }
+  return false;
+}
+
+// Risky paths for the scope guard (D2 of the v0.2 plan). Returns a kind or null.
+export function riskyKind(relPath) {
+  const parts = relPath.replace(/\\/g, '/').split('/').filter(Boolean);
+  const base = parts[parts.length - 1] || '';
+  const dirs = parts.slice(0, -1).map((d) => d.toLowerCase());
+  const lbase = base.toLowerCase();
+  const kinds = [];
+  if (dirs.some((d) => ['migrations', 'migrate', 'alembic', 'flyway', 'liquibase'].includes(d))) kinds.push('migration');
+  if (dirs.some((d, i) => d === '.github' && dirs[i + 1] === 'workflows') || lbase === '.gitlab-ci.yml'
+    || dirs.includes('.circleci') || base === 'Jenkinsfile' || lbase === 'azure-pipelines.yml' || dirs.includes('.buildkite')) kinds.push('CI/CD');
+  if (/\.(tf|tfvars)$/i.test(base) || dirs.some((d) => ['terraform', 'k8s', 'kubernetes', 'helm', 'charts'].includes(d))
+    || /^kustomization\.ya?ml$/i.test(base) || base === 'Chart.yaml') kinds.push('infrastructure');
+  if (dirs.some((d) => ['auth', 'authn', 'authz', 'oauth', 'iam'].includes(d))) kinds.push('auth');
+  return kinds.length ? kinds.join(' and ') : null;
+}
+
+const samePath = (a, b) => {
+  if (!a || !b) return false;
+  const x = realpathLoose(path.resolve(a));
+  const y = realpathLoose(path.resolve(b));
+  return process.platform === 'win32' || process.platform === 'darwin' ? x.toLowerCase() === y.toLowerCase() : x === y;
+};
+
+// `state` is injected for tests: {session: {approvals, scope, dispatch} | null, ledger: [] | null}.
+// null (or a missing part) means "unavailable": the rules that need it make no decision.
+// Returns {decision, rule, reason, effects?} or null. Never `allow`.
+export function decide(payload, state = null) {
   if (!payload || typeof payload !== 'object') return null;
   const tool = payload.tool_name;
   const input = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input : {};
+  const agentType = typeof payload.agent_type === 'string' && payload.agent_type ? payload.agent_type : null;
+  const cwd = typeof payload.cwd === 'string' ? payload.cwd : undefined;
+  const session = state && state.session && typeof state.session === 'object' ? state.session : null;
+  const ledger = state && Array.isArray(state.ledger) ? state.ledger : null;
+  const asks = [];
+  const denies = [];
+  const effects = [];
+  const safe = (fn) => { try { fn(); } catch { /* each rule fails open on its own */ } };
+
+  // v0.1: command ask list.
   if (tool === 'Bash' || tool === 'PowerShell') {
     const rule = analyzeCommand(input.command, tool === 'Bash');
-    return rule ? { decision: 'ask', rule, reason: `agent-org guard: this command matches the ask list (${rule}). Confirm before it runs.` } : null;
+    if (rule) asks.push({ rule, reason: `agent-org guard: this command matches the ask list (${rule}). Confirm before it runs.` });
   }
-  if ((tool === 'Edit' || tool === 'Write') && payload.agent_type === QA_AGENT) {
-    if (isTestPath(input.file_path, payload.cwd)) return null;
-    return {
-      decision: 'deny',
-      rule: 'qa-test-paths-only',
-      reason: 'agent-org guard: quality-assurance-architect may only edit test files (test/, tests/, __tests__/, spec/, specs/, fixtures/, testdata/, src/test/, *.test.*, *.spec.*, *_test.*, test_*.*). Do not make this change; report it to the main thread as a finding instead.',
-    };
+
+  // v0.1: QA may only edit test paths.
+  if (EDIT_TOOLS.has(tool) && agentType === QA_AGENT && !isTestPath(editTarget(input), cwd)) {
+    denies.push({ rule: 'qa-test-paths-only', reason: QA_REASON });
+  }
+
+  // v0.2: audit and state protection (no state needed).
+  safe(() => {
+    if (touchesProtected(tool, input, cwd)) {
+      asks.push({ rule: 'audit-state-protect', reason: 'agent-org guard: this touches the agent-org audit log or state. Confirm before it runs.' });
+    }
+  });
+
+  // v0.2: same-group edit deny.
+  safe(() => {
+    if (!EDIT_TOOLS.has(tool) || !agentType || !agentType.startsWith('agent-org:') || !ledger || !session) return;
+    const me = typeof payload.agent_id === 'string' ? payload.agent_id : null;
+    const target = editTarget(input);
+    if (!me || !target) return;
+    const myGroup = session.dispatch[me] && session.dispatch[me].promptId;
+    if (!myGroup) return;
+    const abs = path.resolve(cwd || '.', target);
+    const other = ledger.find((r) => !r.collision && r.agent_id && r.agent_id !== me && samePath(r.file, abs)
+      && session.dispatch[r.agent_id] && session.dispatch[r.agent_id].promptId === myGroup);
+    if (!other) return;
+    const rel = cwd && isUnder(abs, path.resolve(cwd)) ? path.relative(path.resolve(cwd), abs) : path.basename(abs);
+    denies.push({
+      rule: 'same-group-edit',
+      reason: `agent-org guard: ${rel} was changed by ${other.agent_type || 'another agent'} in this parallel group. Don't edit it; report BLOCKED: ${rel} changed by another agent.`,
+    });
+    effects.push({ kind: 'ledger', rec: { agent_id: me, agent_type: agentType, file: abs, collision: 'guard-deny' } });
+    effects.push({ kind: 'audit', repo: repoOfFile(abs, cwd), rec: { event: 'guard-deny', agent_id: me, agent_type: agentType, file: abs, flags: ['same-group-edit'] } });
+  });
+
+  // v0.2: team gate.
+  safe(() => {
+    if (tool !== 'Agent') return;
+    const type = typeof input.subagent_type === 'string' ? input.subagent_type : '';
+    if (!type.startsWith('agent-org:') || typeof input.name !== 'string' || !input.name) return;
+    if (!session) return; // state unreadable: fail open
+    const repo = repoName(cwd || process.cwd(), cwd);
+    if (session.approvals.some((a) => a && a.repo === repo && a.mode === 'team')) return;
+    denies.push({
+      rule: 'team-gate',
+      reason: 'agent-org guard: named agent-org dispatches start agent teams, and this session has no approved Mode: team. Dispatch without a name, or re-plan with the PM and get the team mode approved.',
+    });
+    effects.push({ kind: 'audit', repo, rec: { event: 'guard-deny', agent_type: type, flags: ['team-gate'] } });
+  });
+
+  // v0.2: scope growth (main thread only).
+  safe(() => {
+    if (!EDIT_TOOLS.has(tool) || agentType || !session) return;
+    const target = editTarget(input);
+    if (!target) return;
+    const abs = resolvePath(target, cwd);
+    if (orgSubdir('').some((d) => isUnder(abs, d)) || isUnder(abs, path.join(home(), '.agent-org'))) return;
+    const repo = repoOfFile(abs, cwd);
+    if (approvalFor(session, repo)) return;
+    const seen = Array.isArray(session.scope[repo]) ? session.scope[repo] : [];
+    if (seen.some((f) => samePath(f, abs))) return; // already edited this session
+    const root = repoRoot(path.dirname(abs), cwd);
+    const rel = isUnder(abs, root) ? path.relative(root, abs) : abs;
+    const kind = riskyKind(rel);
+    if (kind) {
+      asks.push({ rule: 'scope-risky-path', reason: `agent-org guard: ${kind} path with no approved intent in this session. Approve to continue, or escalate with agent-org:deliver.` });
+    }
+    const n = seen.length + 1;
+    if (n > 3) {
+      asks.push({ rule: 'scope-file-count', reason: `agent-org guard: this job has grown past Level 1 (${n} files, no approved intent). Approve to continue, or escalate with agent-org:deliver.` });
+    }
+  });
+
+  if (denies.length) {
+    return { decision: 'deny', rule: denies.map((d) => d.rule).join('; '), reason: denies.map((d) => d.reason).join(' '), effects };
+  }
+  if (asks.length) {
+    return { decision: 'ask', rule: asks.map((a) => a.rule).join('; '), reason: asks.map((a) => a.reason).join(' '), effects };
   }
   return null;
+}
+
+// Loads session state for decide(). Missing → empty; corrupt or unreadable → null (fail open).
+export function loadState(payload) {
+  const sid = payload && payload.session_id;
+  let session = null;
+  let ledger = null;
+  try { session = readState(sid); } catch { session = null; }
+  try { ledger = readLedger(sid); } catch { ledger = null; }
+  return { session, ledger };
+}
+
+function applyEffects(payload, effects) {
+  for (const e of effects || []) {
+    try {
+      if (e.kind === 'ledger') appendLedger(payload.session_id, e.rec);
+      else if (e.kind === 'audit') auditAppend(e.repo, { session: payload.session_id, tool_use_id: payload.tool_use_id, ...e.rec });
+    } catch { /* fail open */ }
+  }
 }
 
 function readStdin(timeoutMs = 3000) {
@@ -301,9 +473,10 @@ async function main() {
   let payload;
   try { payload = JSON.parse(raw); } catch { return; }
   let result = null;
-  try { result = decide(payload); } catch { result = null; }
+  try { result = decide(payload, loadState(payload)); } catch { result = null; }
   debugLog(payload, result);
   if (!result) return;
+  applyEffects(payload, result.effects);
   const out = JSON.stringify({
     hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: result.decision, permissionDecisionReason: result.reason },
   });
