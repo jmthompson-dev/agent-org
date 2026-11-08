@@ -79,29 +79,38 @@ function evidenceFor(kind, calls) {
 
 const tokens = (s) => s.split(/[^a-z0-9]+/).filter(Boolean);
 
-// A claim sentence is relayed when it matches text from a specialist's own report.
-export function isRelayed(sentence, specialistTexts) {
-  const n = norm(sentence);
-  const nt = tokens(n);
-  for (const t of specialistTexts) {
-    const full = norm(t);
-    if (full.includes(n)) return true;
-    for (const s of sentences(t)) {
-      const ns = norm(s);
-      if (ns.length >= 8 && n.includes(ns)) return true;
-      const st = new Set(tokens(ns));
-      if (nt.length && nt.filter((w) => st.has(w)).length / nt.length >= 0.8) return true;
+// Attribution prefix of a relayed sentence ("full-stack-developer reports:", "QA said"), up to 3 words before the verb.
+const ATTRIBUTION = /^\s*(?:\S+\s+){0,3}?(?:reports?|reported|says|said|confirms?|confirmed|returns?|returned|writes|wrote)\b\s*:?\s*/i;
+
+// The specialist sentences that may back a relay (v0.2d): claims that aren't negated or future-tense, from an
+// agent whose last stop passed its own check (`finished` recorded). Quoted text doesn't count, as on the main thread.
+function relayableSentences(specialists) {
+  const out = [];
+  for (const sp of specialists) {
+    if (!sp || !sp.finished || typeof sp.text !== 'string') continue;
+    for (const s of sentences(claimableText(sp.text))) {
+      if (!CLAIMS.some((c) => c.re.test(s)) || skipSentence(s)) continue;
+      out.push(new Set(tokens(norm(s))));
     }
   }
-  return false;
+  return out;
 }
 
-export function findClaims(text, specialistTexts = []) {
+// v0.2d: a claim sentence is relayed when every word of it (attribution prefix removed) appears in one relayable
+// specialist sentence, so "X reports: Tests: PASS" matches "Tests: PASS (6/6)".
+export function isRelayed(sentence, specialists) {
+  const words = tokens(norm(sentence.replace(ATTRIBUTION, '')));
+  if (!words.length) return false;
+  return relayableSentences(specialists).some((st) => words.every((w) => st.has(w)));
+}
+
+// `specialists`: [{ id, text, finished }] from this session's subagent transcripts.
+export function findClaims(text, specialists = []) {
   const out = [];
   for (const s of sentences(claimableText(text))) {
     const hit = CLAIMS.find((c) => c.re.test(s));
     if (!hit || skipSentence(s)) continue;
-    if (isRelayed(s, specialistTexts)) continue;
+    if (isRelayed(s, specialists)) continue;
     out.push({ sentence: s, kind: hit.kind });
   }
   return out;
@@ -167,18 +176,26 @@ export function checkStop(payload) {
   if (!finalText) return null;
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : process.cwd();
 
+  // finished[agent_id] is recorded only on an unblocked SubagentStop; unreadable state → no relays recognized.
+  let finished = {};
+  try { finished = readState(payload.session_id).finished || {}; } catch { finished = {}; }
   const subs = [];
+  const specialists = [];
   for (const f of subagentTranscripts(payload.transcript_path, payload.session_id)) {
-    try { subs.push(readJsonl(f)); } catch { /* skip */ }
+    try {
+      const ents = readJsonl(f);
+      subs.push(ents);
+      const id = path.basename(f, '.jsonl').replace(/^agent-/, ''); // agent-<agent_id>.jsonl (P5 B1)
+      specialists.push({ id, text: finalAssistantText(ents), finished: Boolean(finished[id]) });
+    } catch { /* skip */ }
   }
-  const specialistTexts = subs.map(finalAssistantText).filter(Boolean);
   let calls = toolCallsInTurn(entries);
   // v0.2c: a turn with no tool calls (a summary or answer) may restate the previous turn's evidence.
   if (!calls.length) calls = toolCallsInPreviousTurn(entries);
   const failures = [];
   const kinds = new Set();
 
-  for (const c of findClaims(finalText, specialistTexts)) {
+  for (const c of findClaims(finalText, specialists)) {
     if (!evidenceFor(c.kind, calls)) {
       failures.push(`claim "${short(c.sentence)}" has no successful matching command in this turn`);
       kinds.add(`unbacked-${c.kind}`);
