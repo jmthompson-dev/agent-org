@@ -16,6 +16,7 @@ On escalation, the main thread calls `agent-org:principal-project-manager`. The 
 - A `UserPromptSubmit` hook pattern-matches hard triggers using **word boundaries** (so `author` doesn't match `auth`) and injects a *nudge* to load the `agent-org:deliver` skill. It is not an order.
 - A short `SessionStart` rule card gives the main thread the level definitions in every session, so model judgment covers what the hook misses.
 - The hook fails open, has no dependencies, uses a short timeout and produces the same output however often it fires.
+- Trigger groups: auth, secrets, data, infra, delivery, change (dependencies, upgrades, breaking changes, public API). Bare `production`, `release`, `pipeline` and `token` are excluded: they fire on ordinary prompts, and a nudge that fires constantly gets ignored.
 - `UserPromptSubmit` also fires on background-agent reports and cross-session messages (Phase 1 §5e). v0.1 accepts the redundant nudge. When debug is on, the hook logs payload **key names** so Phase 4 can design a real filter from real payloads. **Open.**
 
 ### D4. Hard triggers set the minimum level — Decided
@@ -83,7 +84,7 @@ All are main-thread workflows that dispatch agent-org specialists, which keeps D
 
 ### D15. Persona text is verbatim and pinned to a commit — Decided
 - Each agent embeds its canonical persona body unchanged, between marker comments, stamped with the source commit.
-- The plugin pins a specific `agent-personas` commit, recorded in `plugin.json` `metadata`. It does **not** follow `production` HEAD. Bump the pin deliberately by regenerating.
+- The plugin pins a specific `agent-personas` commit, recorded in `plugin.json` `metadata`. It does **not** follow the persona repo's `main` HEAD. Bump the pin deliberately by regenerating.
 - First pin: the commit that contains the event-driven supervision fix, which replaced the PM's unenforceable "every 60 seconds" clauses at the source instead of overriding them in the plugin.
 
 ### D16. The infra agents get disjoint descriptions — Decided
@@ -94,4 +95,4 @@ All are main-thread workflows that dispatch agent-org specialists, which keeps D
 ## Repo
 
 ### D17. This repo is public — Decided
-No secrets, tokens, absolute home paths, synced-bucket IDs or employer-specific details in the prompts or the generated plugin.
+No secrets, tokens, absolute home paths, synced-bucket IDs or employer-specific details in the prompts or the generated plugin. Licensed MIT.

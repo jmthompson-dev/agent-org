@@ -1,0 +1,14 @@
+{
+  "name": "agent-org",
+  "version": "0.1.0",
+  "description": "Principal Project Manager orchestration with 14 pinned specialist personas, level-based escalation and an approval-gated intent workflow",
+  "author": {
+    "name": "jmthompson-dev"
+  },
+  "license": "MIT",
+  "metadata": {
+    "personasRepo": "https://github.com/jmthompson-dev/agent-personas",
+    "personasCommit": "6d13ca61f0b556c53623bf056a4ff272024ce046",
+    "personasBranch": "main"
+  }
+}

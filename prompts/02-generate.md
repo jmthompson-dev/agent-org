@@ -8,7 +8,7 @@ Read these first, in this order:
 
 ## Hard constraints
 
-- Write only inside this repo: `plugin/`, `.claude-plugin/marketplace.json`, `scripts/`, and `reports/02-generate-<YYYY-MM-DD>.md`.
+- Write only inside this repo: `plugin/`, `.claude-plugin/marketplace.json`, `scripts/`, `LICENSE`, and `reports/02-generate-<YYYY-MM-DD>.md`.
 - Do not modify `~/.claude`, the `agent-personas` repo, or any application repo.
 - Do not install, enable or update the plugin or marketplace. Do not commit, push or tag.
 - Do not launch subagents, agent teams or nested `claude` sessions. Live behavior is Phase 4's job.
@@ -17,7 +17,7 @@ Read these first, in this order:
 
 ## Preconditions — check these first, and stop on any failure
 
-1. `~/git/agent-personas` exists, the working tree is **clean**, and you're on `production`. If it's dirty, stop: the supervision fix must be committed first.
+1. `~/git/agent-personas` exists, the working tree is **clean**, and you're on `main`. If it's dirty, stop: persona changes must be committed first.
 2. Record `PIN = git -C ~/git/agent-personas rev-parse HEAD`.
 3. At `PIN`, `agents/principal-project-manager.md` contains no `60 seconds` (`git show PIN:agents/principal-project-manager.md`). If it does, stop: the pin predates the supervision fix (D15).
 4. All 14 persona files exist at `PIN`.
@@ -37,6 +37,7 @@ plugin/
 │   ├── architecture-review/SKILL.md
 │   ├── security-audit/SKILL.md
 │   └── release-validation/SKILL.md
+├── LICENSE
 ├── hooks/
 │   ├── hooks.json
 │   ├── escalate.mjs
@@ -51,7 +52,8 @@ scripts/sync-personas.mjs                 # repo-level, not shipped in the plugi
 
 ### 1. `plugin.json`
 - `name: agent-org`, `version: 0.1.0`, a one-line `description`, and `author`.
-- `metadata`: `personasRepo` (the public GitHub URL), `personasCommit: PIN`, `personasBranch: production`.
+- `metadata`: `personasRepo` (the public GitHub URL), `personasCommit: PIN`, `personasBranch: main`.
+- `license: MIT`. Also write an MIT `LICENSE` (holder: jmthompson-dev, current year) at the repo root and at `plugin/LICENSE`.
 - Don't set `agents`, `commands` or `skills` paths; default scanning is correct (Phase 1 §5a: setting them replaces the defaults).
 
 ### 2. `marketplace.json`
@@ -155,7 +157,7 @@ model: <see table>
 
 **`escalate.mjs`:**
 - Read the hook JSON from stdin and take the prompt text.
-- Match case-insensitively with word boundaries against named trigger groups: auth (`authentication`, `authorization`, `oauth`, `sso`, `jwt`, `login`, standalone `auth`/`authn`/`authz`), secrets (`secret(s)`, `credential(s)`, `api key`, `password`), data (`migration`, `schema`, `alter table`, `ddl`), infra (`terraform`, `helm`, `kubernetes`, `k8s`, `kubectl`, `iam`, `infrastructure`), delivery (`ci/cd`, `pipeline`, `github actions`, `deploy`, `deployment`, `release`, `production`), cross-service (`across services`, `multiple services`, `microservices`). **Don't** match bare `token` (too noisy in LLM work) or `author`.
+- Match case-insensitively with word boundaries against named trigger groups, in this fixed order: auth (`authentication`, `authorization`, `oauth`, `sso`, `jwt`, `login`, standalone `auth`/`authn`/`authz`), secrets (`secret(s)`, `credential(s)`, `api key`, `password`), data (`migration`, `schema`, `alter table`, `ddl`), infra (`terraform`, `helm`, `kubernetes`, `k8s`, `kubectl`, `iam`, `infrastructure`), delivery (`ci/cd`, `github actions`, `deploy*`, `release to prod(uction)`, `prod(uction) deploy/release/rollout`), cross-service (`across services`, `multiple services`, `microservices`), change (`dependency`/`dependencies`, `upgrade*`, `breaking change(s)`, `public api`, `api contract(s)`). **Don't** match bare `token`, `author`, `release`, `production` or `pipeline`: they fire on ordinary prompts, and a nudge that fires constantly gets ignored.
 - On a match, emit `additionalContext` with a nudge: which groups matched; "this may be Level 2+ — consider loading the `agent-org:deliver` skill; if it's clearly Level 0–1, proceed normally." The output must be the same however often the hook fires.
 - If `AGENT_ORG_HOOK_DEBUG=1`, append one line to `~/.claude/agent-org/hook-debug.jsonl` with a timestamp, the payload's **top-level key names**, prompt length and matched groups. **Never log prompt text.** Create the directory if needed.
 - Fail open: catch everything and always exit 0. A hook error must never block a prompt.
@@ -183,6 +185,10 @@ Cover install (`claude plugin marketplace add <repo path or URL>`, then `claude 
    - `"refactor auth middleware"` → nudge (auth)
    - `"thank the author"` → no output
    - `"add a migration for users"` → nudge (data)
+   - `"write release notes for the ML pipeline"` → no output
+   - `"production is down, check the logs"` → no output
+   - `"upgrade spring boot to 4.1"` → nudge (change)
+   - `"deploy to production"` → nudge (delivery)
    - malformed JSON → exit 0, no output
 4. Run `session-start.mjs` and confirm it prints the rule card.
 5. Check the skill frontmatter: `deliver` is the only skill **without** `disable-model-invocation: true`; the other four have it.

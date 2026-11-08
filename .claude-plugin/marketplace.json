@@ -1,0 +1,14 @@
+{
+  "name": "agent-org",
+  "description": "Marketplace for the agent-org Claude Code plugin",
+  "owner": {
+    "name": "jmthompson-dev"
+  },
+  "plugins": [
+    {
+      "name": "agent-org",
+      "source": "./plugin",
+      "description": "Principal Project Manager orchestration with 14 pinned specialist personas, level-based escalation and an approval-gated intent workflow"
+    }
+  ]
+}
