@@ -19,8 +19,8 @@ Each phase ends with **stop and report**. Review the report before running the n
 
 1. `01-inspect.md` — read-only inventory of `~/.claude`, the persona repo, and verified CLI capabilities
 2. `02-generate.md` — generate the plugin into `plugin/`
-3. `03-merge-settings.md` — merge user-level settings (permissions, hook wiring) with a shown diff
-4. `04-validate.md` — bounded validation in a scratch directory
+3. `03-validate.md` — install the plugin and test its behavior live in a scratch repo
+4. `04-permissions.md` — user-level ask rules and the command guard, using what Phase 3 learned
 
 ## Branching
 

@@ -11,7 +11,7 @@ Read these first, in this order:
 - Write only inside this repo: `plugin/`, `.claude-plugin/marketplace.json`, `scripts/`, `LICENSE`, and `reports/02-generate-<YYYY-MM-DD>.md`.
 - Do not modify `~/.claude`, the `agent-personas` repo, or any application repo.
 - Do not install, enable or update the plugin or marketplace. Do not commit, push or tag.
-- Do not launch subagents, agent teams or nested `claude` sessions. Live behavior is Phase 4's job.
+- Do not launch subagents, agent teams or nested `claude` sessions. Live behavior is Phase 3's job.
 - No secrets, absolute home paths or employer-specific details in anything you write (D17). Hooks resolve paths at runtime.
 - Don't edit persona text. If a persona looks wrong, report it.
 
@@ -204,7 +204,7 @@ Write `reports/02-generate-<YYYY-MM-DD>.md`:
 4. Agent table: id, model, tools, description, and any deviation from the defaults with its justification
 5. Enforcement gaps: instruction-only versus enforced, per agent and for the approval gate
 6. Verification results: each check marked PASS / FAIL / NOT RUN, with commands and output
-7. UNVERIFIED items Phase 4 must test live: nesting, the hook payload filter, whether the main thread actually loads `deliver` on a nudge, whether `SessionStart` context lands
+7. UNVERIFIED items Phase 3 must test live: nesting, the hook payload filter, whether the main thread actually loads `deliver` on a nudge, whether `SessionStart` context lands
 8. Open questions for me
 
 ## Stop

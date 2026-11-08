@@ -1,6 +1,6 @@
 # Design decisions
 
-Status key: **Decided** · **Verified** (confirmed in Phase 1 against docs or the CLI) · **Open** (needs a live test in Phase 4)
+Status key: **Decided** · **Verified** (confirmed in Phase 1 against docs or the CLI) · **Open** (needs a live test in Phase 3)
 
 ## Orchestration
 
@@ -17,7 +17,7 @@ On escalation, the main thread calls `agent-org:principal-project-manager`. The 
 - A short `SessionStart` rule card gives the main thread the level definitions in every session, so model judgment covers what the hook misses.
 - The hook fails open, has no dependencies, uses a short timeout and produces the same output however often it fires.
 - Trigger groups: auth, secrets, data, infra, delivery, change (dependencies, upgrades, breaking changes, public API). Bare `production`, `release`, `pipeline` and `token` are excluded: they fire on ordinary prompts, and a nudge that fires constantly gets ignored.
-- `UserPromptSubmit` also fires on background-agent reports and cross-session messages (Phase 1 §5e). v0.1 accepts the redundant nudge. When debug is on, the hook logs payload **key names** so Phase 4 can design a real filter from real payloads. **Open.**
+- `UserPromptSubmit` also fires on background-agent reports and cross-session messages (Phase 1 §5e). v0.1 accepts the redundant nudge. When debug is on, the hook logs payload **key names** so Phase 3 can design a real filter from real payloads. **Open.**
 
 ### D4. Hard triggers set the minimum level — Decided
 A trigger sets the floor. The PM can raise a level but never lower it below a trigger.
@@ -57,13 +57,13 @@ Run the everyday session on Sonnet. Levels 0–1 never spawn an agent, so trivia
 `.claude-plugin/marketplace.json` at the repo root points to `./plugin`. The generated plugin is committed, so every regeneration is a reviewable diff.
 
 ### D10. Plugin settings can't carry permissions — Verified
-Plugin `settings.json` honors only `agent` and `subagentStatusLine`. Ask rules live in user `settings.json` (Phase 3).
+Plugin `settings.json` honors only `agent` and `subagentStatusLine`. Ask rules live in user `settings.json` (Phase 4).
 
 ### D11. Hooks live only in the plugin — Decided
-Plugin hooks and user hooks aren't de-duplicated, so Phase 3 must not copy the plugin's hooks into user settings.
+Plugin hooks and user hooks aren't de-duplicated, so Phase 4 must not copy the plugin's hooks into user settings.
 
-### D12. The command guard is Phase 3 — Decided
-Ask rules match command text only (`git -C . push` slips past `Bash(git push *)`). A plugin `PreToolUse` guard tightens them. It belongs with the permissions work in Phase 3, not in Phase 2.
+### D12. The command guard is Phase 4 — Decided
+Ask rules match command text only (`git -C . push` slips past `Bash(git push *)`). A plugin `PreToolUse` guard tightens them. It belongs with the permissions work in Phase 4, not in Phase 2.
 
 ### D13. No rules or CLAUDE.md in the plugin — Verified
 A plugin's root `CLAUDE.md` isn't loaded. Orchestration policy lives in the `deliver` skill, the `SessionStart` rule card and the agents' runtime bindings.
@@ -78,7 +78,7 @@ A plugin's root `CLAUDE.md` isn't loaded. Orchestration policy lives in the `del
 | `security-audit` | user only | Standalone audit: scope check → threat analysis → justified scans → evidence → retest; never accepts risk |
 | `release-validation` | user only | Pin the candidate; collect QA, Product and InfoSec dispositions and human approvals; never deploys |
 
-All are main-thread workflows that dispatch agent-org specialists, which keeps D2 intact. User-only skills don't sit in Claude's context as matching candidates, so this also cuts always-loaded text. The `engineering` and `design` plugins, synced from claude.ai, duplicated the specialists and carried failing connectors. **Decided: disabled** at the claude.ai source, since a local-only disable may be re-synced. Phase 4 confirms they're gone with `claude plugin list`.
+All are main-thread workflows that dispatch agent-org specialists, which keeps D2 intact. User-only skills don't sit in Claude's context as matching candidates, so this also cuts always-loaded text. The `engineering` and `design` plugins, synced from claude.ai, duplicated the specialists and carried failing connectors. **Decided: disabled** at the claude.ai source, since a local-only disable may be re-synced. Phase 3 confirms they're gone with `claude plugin list`.
 
 ## Personas
 
@@ -96,3 +96,6 @@ All are main-thread workflows that dispatch agent-org specialists, which keeps D
 
 ### D17. This repo is public — Decided
 No secrets, tokens, absolute home paths, synced-bucket IDs or employer-specific details in the prompts or the generated plugin. Licensed MIT.
+
+### D18. Validate before permissions — Decided
+Phase 3 is live validation and Phase 4 is permissions. The permissions work depends on answers only a live run gives: whether `PreToolUse` input identifies the calling agent (which decides whether QA's `Edit` can be limited to test paths), and what real `UserPromptSubmit` payloads look like (for the hook filter).
