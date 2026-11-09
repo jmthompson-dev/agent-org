@@ -14,6 +14,8 @@
 //   7. (v0.2e) Specialists: an ask-list command from any agent-org specialist, teammate or subagent, is denied,
 //      not asked (D30): teammates run in permissionMode "auto", and Phase 6b saw a background specialist run
 //      `git push` in an auto-mode session after an ask. The main thread keeps the ask.
+//   8. (v0.2f) Team-start ask: with CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1, a named non-agent-org Agent call
+//      without `isolation` would start an agent team, so `ask` (D30). Audited as guard-ask ["team-start"].
 //   (v0.2e, V-4) Files under the payload's scratchpad_dir are exempt from rules 2, 3 and 6.
 // Agent identity goes through effectiveType() (v0.2c, F1): teammate hooks carry agent_type = the teammate's
 // name, and the dispatch record maps their agent_id back to the agent-org type.
@@ -335,8 +337,9 @@ export function inScratchpad(payload, target) {
 
 // `state` is injected for tests: {session: {approvals, scope, dispatch, finished, riskySeen} | null, ledger: [] | null}.
 // null (or a missing part) means "unavailable": the rules that need it make no decision.
+// `env` is injected for tests (v0.2f); it defaults to the hook's own environment.
 // Returns {decision, rule, reason, effects?} or null. Never `allow`.
-export function decide(payload, state = null) {
+export function decide(payload, state = null, env = process.env) {
   if (!payload || typeof payload !== 'object') return null;
   const tool = payload.tool_name;
   const input = payload.tool_input && typeof payload.tool_input === 'object' ? payload.tool_input : {};
@@ -424,6 +427,21 @@ export function decide(payload, state = null) {
       reason: 'agent-org guard: named agent-org dispatches start agent teams, and this session has no approved Mode: team. Dispatch without a name, or re-plan with the PM and get the team mode approved.',
     });
     effects.push({ kind: 'audit', repo, rec: { event: 'guard-deny', agent_type: type, flags: ['team-gate'] } });
+  });
+
+  // v0.2f: team-start ask for named non-agent-org dispatches while agent teams are enabled (D30).
+  // An `isolation` call stays a subagent (P5 F0); hooks inherit the flag, also from settings env (P5 F2).
+  safe(() => {
+    if (tool !== 'Agent') return;
+    if (!env || env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS !== '1') return;
+    const type = typeof input.subagent_type === 'string' ? input.subagent_type : '';
+    if (type.startsWith('agent-org:') || typeof input.name !== 'string' || !input.name) return;
+    if (input.isolation !== undefined && input.isolation !== null && input.isolation !== '') return;
+    asks.push({
+      rule: 'team-start',
+      reason: 'agent-org guard: this named dispatch would start an agent team (teams are enabled). Approve to start a team, or deny to have it dispatched without a name.',
+    });
+    effects.push({ kind: 'audit', repo: repoName(cwd || process.cwd(), cwd), rec: { event: 'guard-ask', agent_type: type || null, flags: ['team-start'] } });
   });
 
   // v0.2: scope growth (main thread only).
