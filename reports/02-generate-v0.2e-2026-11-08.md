@@ -138,3 +138,9 @@ No change in this run. The D25 "Phase 6b changes" note, the D27 whitespace note 
 2. **Bindings' "Instruction-only" list:** should engineer bindings now say the guard denies commit, push, merge, tag and deploy commands, instead of listing them as instruction-only? Every infra binding is at 248–249 words, so that would need a trim elsewhere.
 3. **Hedge list breadth:** `may`, `could` and `expect` are in the list as the prompt specifies. Narrow it if Phase 6c shows missed true claims.
 4. **Plugin icon** (carried over): `claude plugin validate` still warns `ICON_MISSING`.
+
+**Resolved (user, 2026-11-08):**
+1. Relay from hand-back text: **keep**. Without it, faithful relays of hand-back reports would be blocked again (Phase 6's false-block problem by another route), and it uses the same guards.
+2. Bindings' "Instruction-only" list: **defer to v0.2.1**. Understating the protection is harmless, and fixing it means trimming bindings already at the word limit.
+3. Hedge list: **keep as is**; Phase 6c will show whether it hides real claims.
+4. Icon warning: **ignore**.
