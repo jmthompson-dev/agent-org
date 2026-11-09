@@ -8,6 +8,8 @@
 //         agent's own transcript), a scan for refused "modified since read" edits (collisions), an audit
 //         `result` record, and finished[agent_id] in the session state (for the guard's same-group fallback).
 //         The PM is exempt from the report contract: it returns an intent (audited with outcome `plan`).
+//         v0.2e: with no last_assistant_message the report is the last SubagentHandback message (B-1); a report
+//         whose first line has no outcome falls back to its last `Outcome:` line, flagged `missing-outcome` (V-2).
 // Blocks once (stop_hook_active false) with hookSpecificOutput.additionalContext (v0.2c: "Stop hook feedback",
 // Phase 6); on the second stop it only warns. Agent identity goes through effectiveType() (F1).
 // Fail-open, no content logged.
@@ -15,13 +17,13 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  filesOpenedInSession, filesSeenInOutput, finalAssistantText, isShell, readJsonl, refusedStaleEdits,
+  filesOpenedInSession, filesSeenInOutput, finalAssistantText, isShell, lastHandbackMessage, readJsonl, refusedStaleEdits,
   subagentTranscripts, succeeded, toolCalls, toolCallsInPreviousTurn, toolCallsInTurn,
 } from './lib/transcript.mjs';
 import { appendLedger, effectiveType, readLedger, readState, safeId, updateState } from './lib/state.mjs';
 import { repoName } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
-import { auditBase, parseOutcome } from './record.mjs';
+import { auditBase, lastOutcome, parseOutcome } from './record.mjs';
 
 // The PM returns an intent, not a report: exempt from the report contract ("PASS" on a plan means nothing).
 const PM = 'agent-org:principal-project-manager';
@@ -63,6 +65,9 @@ const NEGATED = /\b(?:not|never|nothing|didn't|didn’t|haven't|haven’t|hasn't
 // v0.2c (F2): future-tense or plan sentences describe what will happen, not what did.
 const FUTURE = /\b(?:I'll|I’ll|I\s+will|will|going\s+to|once|after|before|next|then\s+I)\b/i;
 const skipSentence = (s) => NEGATED.test(s) || FUTURE.test(s);
+// v0.2e (V-3): hedges and estimates aren't claims ("roughly a 25% chance the test passes", Phase 6b).
+const HEDGE = /\b(?:roughly|chances?|probabl[ey]|likely|estimat\w*|might|may|could|expect\w*)\b/i;
+const skipClaim = (s) => skipSentence(s) || HEDGE.test(s);
 
 const TEST_CMD = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|node\s+--test\b|pytest\b|python\d*(?:\.\d+)?\s+-m\s+(?:pytest|unittest)\b|mvnw?\b[^|;&]*\b(?:test|verify)\b|gradlew?\b[^|;&]*\btest\b|go\s+test\b|cargo\s+test\b|make\s+(?:test|check)\b|jest\b|vitest\b|deno\s+test\b|dotnet\s+test\b|rspec\b|phpunit\b|tox\b|ctest\b)/i;
 const BUILD_CMD = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b|tsc\b|mvnw?\b[^|;&]*\b(?:package|install|compile|verify)\b|gradlew?\b[^|;&]*\b(?:build|assemble)\b|go\s+build\b|cargo\s+build\b|make\b|dotnet\s+build\b|vite\s+build\b|webpack\b|docker\s+build\b)/i;
@@ -89,7 +94,7 @@ function relayableSentences(specialists) {
   for (const sp of specialists) {
     if (!sp || !sp.finished || typeof sp.text !== 'string') continue;
     for (const s of sentences(claimableText(sp.text))) {
-      if (!CLAIMS.some((c) => c.re.test(s)) || skipSentence(s)) continue;
+      if (!CLAIMS.some((c) => c.re.test(s)) || skipClaim(s)) continue;
       out.push(new Set(tokens(norm(s))));
     }
   }
@@ -109,7 +114,7 @@ export function findClaims(text, specialists = []) {
   const out = [];
   for (const s of sentences(claimableText(text))) {
     const hit = CLAIMS.find((c) => c.re.test(s));
-    if (!hit || skipSentence(s)) continue;
+    if (!hit || skipClaim(s)) continue;
     if (isRelayed(s, specialists)) continue;
     out.push({ sentence: s, kind: hit.kind });
   }
@@ -122,32 +127,34 @@ const EXT = 'js|mjs|cjs|jsx|ts|tsx|mts|cts|json|jsonc|jsonl|md|mdx|py|pyi|rb|go|
 const CITE_RE = new RegExp(String.raw`(?<![\w@/.~:-])((?:~|\.{1,2})?/?(?:[\w@.+-]+/)*[\w@+-][\w@.+-]*\.(?:${EXT})|(?:~|\.{1,2})?/?(?:[\w@.+-]+/)+[\w@.+-]+):\d+(?:[-–]\d+)?(?![\w/])`, 'gi');
 const NOT_FILES = /^(?:node|next|nuxt|vue|react|express|three|chart|d3|socket\.io|ember|backbone|angular|deno)\.js$/i;
 
+// Returns [{ path, cite }], where `cite` is the full `path:line` token (v0.2e, V-5: the reason names it).
 export function findCitations(text) {
   const clean = stripQuotes(stripFences(text)).replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s)>\]]+/gi, ' ');
-  const out = new Set();
+  const out = new Map();
   for (const s of sentences(clean)) {
     if (skipSentence(s)) continue;
     for (const m of s.matchAll(CITE_RE)) {
       const p = m[1];
       if (!p || NOT_FILES.test(p) || /^\d/.test(p)) continue;
-      out.add(p);
+      if (!out.has(m[0])) out.set(m[0], { path: p, cite: m[0] });
     }
   }
-  return [...out];
+  return [...out.values()];
 }
 
 // `seenNames` holds bare file names seen in tool output (no directory part to resolve).
 function citedButNotOpened(citations, opened, cwd, seenNames = new Set()) {
   const all = [...opened];
   const missing = [];
-  for (const c of citations) {
+  for (const cit of citations) {
+    const c = cit.path;
     const abs = path.resolve(cwd || '.', c.startsWith('~') ? c.replace(/^~/, process.env.HOME || '~') : c);
     if (opened.has(abs)) continue;
     const tail = c.replace(/^\.\//, '').split(/[\\/]/).filter(Boolean).join('/');
     // Tolerate citations relative to a subdirectory or a bare file name: invented files are still caught.
     if (all.some((f) => f.split(path.sep).join('/').endsWith(`/${tail}`))) continue;
     if (seenNames.has(path.basename(tail))) continue;
-    missing.push(c);
+    missing.push(cit);
   }
   return missing;
 }
@@ -155,10 +162,15 @@ function citedButNotOpened(citations, opened, cwd, seenNames = new Set()) {
 // ---------------------------------------------------------------------------------------------
 // Output
 
-function output(event, failures, payload) {
-  const text = `agent-org claim check: ${failures.join('; ')}. Run the check or retract the claim.`;
+// `failures`: claim failures; `uncited`: `path:line` citations never opened or seen (v0.2e, V-5: own wording).
+function output(event, failures, payload, uncited = []) {
+  const parts = [];
+  if (failures.length) parts.push(`agent-org claim check: ${failures.join('; ')}. Run the check or retract the claim.`);
+  for (const c of uncited) parts.push(`agent-org citation check: you cite \`${c}\` but never opened it this session: read it or drop the claim.`);
+  const text = parts.join(' ');
   if (payload.stop_hook_active === true) {
-    return { systemMessage: `agent-org claim check (unresolved after one retry): ${failures.join('; ')}.` };
+    const items = [...failures, ...uncited.map((c) => `you cite \`${c}\` but never opened it this session`)];
+    return { systemMessage: `agent-org claim check (unresolved after one retry): ${items.join('; ')}.` };
   }
   // v0.2c: additionalContext continues the turn like `decision` and shows as "Stop hook feedback" (Phase 6).
   return { hookSpecificOutput: { hookEventName: event, additionalContext: text } };
@@ -186,13 +198,16 @@ export function checkStop(payload) {
       const ents = readJsonl(f);
       subs.push(ents);
       const id = path.basename(f, '.jsonl').replace(/^agent-/, ''); // agent-<agent_id>.jsonl (P5 B1)
-      specialists.push({ id, text: finalAssistantText(ents), finished: Boolean(finished[id]) });
+      // v0.2e (B-1): a specialist that reported through SubagentHandback relays from that message too.
+      const text = [finalAssistantText(ents), lastHandbackMessage(ents)].filter(Boolean).join('\n');
+      specialists.push({ id, text, finished: Boolean(finished[id]) });
     } catch { /* skip */ }
   }
   let calls = toolCallsInTurn(entries);
   // v0.2c: a turn with no tool calls (a summary or answer) may restate the previous turn's evidence.
   if (!calls.length) calls = toolCallsInPreviousTurn(entries);
   const failures = [];
+  const uncited = [];
   const kinds = new Set();
 
   for (const c of findClaims(finalText, specialists)) {
@@ -216,12 +231,12 @@ export function checkStop(payload) {
     for (const s of subs) for (const f of filesOpenedInSession(s, cwd)) opened.add(f);
     addSeen([entries, ...subs]);
     for (const f of citedButNotOpened(citations, opened, cwd, seenNames)) {
-      failures.push(`you cite ${f} but never opened it this session: read it or drop the claim`);
+      uncited.push(f.cite);
       kinds.add('uncited-file');
     }
   }
-  if (!failures.length) return null;
-  return { out: output('Stop', failures, payload), kinds: [...kinds] };
+  if (!failures.length && !uncited.length) return null;
+  return { out: output('Stop', failures, payload, uncited), kinds: [...kinds] };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -234,21 +249,29 @@ export function checkSubagentStop(payload) {
     try { type = effectiveType(payload, readState(payload.session_id)) || type; } catch { /* fail open */ }
   }
   if (!type.startsWith('agent-org:')) return null;
-  const text = typeof payload.last_assistant_message === 'string' ? payload.last_assistant_message : '';
   let entries = [];
   try { entries = readJsonl(payload.agent_transcript_path); } catch { entries = []; }
-  const all = toolCalls(entries);
+  // v0.2e (B-1): with no last_assistant_message (the agent reported through SubagentHandback, Phase 6b), the
+  // report is the last hand-back message. The same text drives the outcome, the backing check and the audit.
+  let text = typeof payload.last_assistant_message === 'string' ? payload.last_assistant_message : '';
+  if (!text.trim()) text = lastHandbackMessage(entries);
+  const hasReport = Boolean(text.trim());
+  // The hand-back call is the report itself, never evidence for it.
+  const all = toolCalls(entries).filter((c) => c.name !== 'SubagentHandback');
   const shell = all.filter(isShell);
   const commands = { run: shell.length, failed: shell.filter((c) => c.isError === true).length };
   const isPm = type === PM;
-  const outcome = isPm ? 'plan' : parseOutcome(text);
   const failures = [];
   const kinds = [];
-  if (isPm) {
-    // Exempt from the report contract; still audited and scanned for collisions below.
-  } else if (!outcome) {
+  let outcome = isPm ? 'plan' : parseOutcome(text);
+  if (!isPm && !outcome && hasReport) {
+    // v0.2e (V-2): no outcome on the first line → use the last `Outcome:` line, and flag the first line separately.
     failures.push('the report\'s first line must be "Outcome: PASS | FAIL | BLOCKED | SKIPPED | NOT RUN"');
     kinds.push('missing-outcome');
+    outcome = lastOutcome(text);
+  }
+  if (isPm || !hasReport) {
+    // PM: exempt from the report contract. No report text at all: fail open (audited as `unknown`).
   } else if (outcome === 'PASS') {
     const backed = NO_SHELL.has(type) ? all.some(succeeded) : shell.some(succeeded);
     if (!backed) {
@@ -288,7 +311,7 @@ export function checkSubagentStop(payload) {
   try {
     auditAppend(repo, {
       ...base, event: 'result', agent_id: payload.agent_id, agent_type: type,
-      outcome: outcome || 'MISSING', commands, flags: kinds.length ? kinds : undefined,
+      outcome: outcome || (hasReport ? 'MISSING' : 'unknown'), commands, flags: kinds.length ? kinds : undefined,
     });
   } catch { /* fail open */ }
 

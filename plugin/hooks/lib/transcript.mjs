@@ -196,6 +196,14 @@ export function finalAssistantText(entries) {
   return '';
 }
 
+// v0.2e (B-1): the report a specialist sent through SubagentHandback (interactive background agents report
+// that way, and their SubagentStop has no last_assistant_message, Phase 6b): input.message of the last call.
+export function lastHandbackMessage(entries) {
+  const calls = toolCalls(entries).filter((c) => c.name === 'SubagentHandback' && typeof c.input.message === 'string');
+  for (let i = calls.length - 1; i >= 0; i--) if (calls[i].input.message.trim()) return calls[i].input.message;
+  return '';
+}
+
 // This session's subagent transcripts: <dir of transcript_path>/<session_id>/subagents/agent-*.jsonl (P5 A8).
 export function subagentTranscripts(transcriptPath, sessionId) {
   if (typeof transcriptPath !== 'string' || !transcriptPath) return [];

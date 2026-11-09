@@ -11,8 +11,10 @@
 //   5. (v0.2) Audit and state protection: `ask` on tool calls that touch ~/.agent-org/audit or /state (C2, D27).
 //   6. (v0.2) Scope growth: `ask` when the main thread grows past ~3 files, or edits a risky path of a kind
 //      it hasn't edited yet, in a repo with no approval recorded for this session (D28).
-//   7. (v0.2c) Teammates: an ask-list command from a teammate is denied, not asked (D30): teammates run in
-//      permissionMode "auto" even under a default-mode lead, so an ask may never reach the user.
+//   7. (v0.2e) Specialists: an ask-list command from any agent-org specialist, teammate or subagent, is denied,
+//      not asked (D30): teammates run in permissionMode "auto", and Phase 6b saw a background specialist run
+//      `git push` in an auto-mode session after an ask. The main thread keeps the ask.
+//   (v0.2e, V-4) Files under the payload's scratchpad_dir are exempt from rules 2, 3 and 6.
 // Agent identity goes through effectiveType() (v0.2c, F1): teammate hooks carry agent_type = the teammate's
 // name, and the dispatch record maps their agent_id back to the agent-org type.
 // Decisions combine: any deny wins, else any ask (reasons joined). It never returns `allow`.
@@ -26,7 +28,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  appendLedger, approvalFor, effectiveType, home, isTeammate, isUnder, orgSubdir, readLedger, readState,
+  appendLedger, approvalFor, effectiveType, home, isUnder, orgSubdir, readLedger, readState,
   realpathLoose, resolvePath,
 } from './lib/state.mjs';
 import { repoOfFile, repoName, repoRoot } from './lib/repo.mjs';
@@ -320,6 +322,17 @@ const samePath = (a, b) => {
   return process.platform === 'win32' || process.platform === 'darwin' ? x.toLowerCase() === y.toLowerCase() : x === y;
 };
 
+// v0.2e (V-4): the agent's own scratch space (payload.scratchpad_dir, outside the repo) isn't the shared tree:
+// no QA deny, no same-group deny, no scope counting, no ledger.
+export function inScratchpad(payload, target) {
+  const dir = payload && typeof payload.scratchpad_dir === 'string' && payload.scratchpad_dir ? payload.scratchpad_dir : null;
+  if (!dir || typeof target !== 'string' || !target) return false;
+  const cwd = typeof payload.cwd === 'string' ? payload.cwd : undefined;
+  const abs = resolvePath(target, cwd);
+  const root = resolvePath(dir, cwd);
+  return [root, realpathLoose(root)].some((d) => isUnder(abs, d) || isUnder(realpathLoose(abs), d));
+}
+
 // `state` is injected for tests: {session: {approvals, scope, dispatch, finished, riskySeen} | null, ledger: [] | null}.
 // null (or a missing part) means "unavailable": the rules that need it make no decision.
 // Returns {decision, rule, reason, effects?} or null. Never `allow`.
@@ -330,11 +343,12 @@ export function decide(payload, state = null) {
   const cwd = typeof payload.cwd === 'string' ? payload.cwd : undefined;
   const session = state && state.session && typeof state.session === 'object' ? state.session : null;
   let agentType = typeof payload.agent_type === 'string' && payload.agent_type ? payload.agent_type : null;
-  let teammate = false;
   try {
     agentType = effectiveType(payload, session) || agentType;
-    teammate = isTeammate(payload, session);
   } catch { /* fail open: v0.1 identity */ }
+  const specialist = Boolean(agentType && agentType.startsWith('agent-org:'));
+  let scratch = false;
+  try { scratch = EDIT_TOOLS.has(tool) && inScratchpad(payload, editTarget(input)); } catch { scratch = false; }
   const ledger = state && Array.isArray(state.ledger) ? state.ledger : null;
   const asks = [];
   const denies = [];
@@ -344,16 +358,16 @@ export function decide(payload, state = null) {
   // v0.1: command ask list.
   if (tool === 'Bash' || tool === 'PowerShell') {
     const rule = analyzeCommand(input.command, tool === 'Bash');
-    if (rule && teammate) {
-      // v0.2c: a teammate's ask may never reach the user (permissionMode "auto"); deny instead.
-      denies.push({ rule: `teammate-ask-list: ${rule}`, reason: `agent-org guard: teammates may not run ${rule}. Report it to the lead; the lead asks the user.` });
+    if (rule && specialist) {
+      // v0.2e: a specialist's ask may never reach the user (auto mode, Phase 6/6b); deny instead.
+      denies.push({ rule: `specialist-ask-list: ${rule}`, reason: `agent-org guard: agent-org specialists may not run ${rule}. Report it to the main thread; the main thread asks the user.` });
     } else if (rule) {
       asks.push({ rule, reason: `agent-org guard: this command matches the ask list (${rule}). Confirm before it runs.` });
     }
   }
 
   // v0.1: QA may only edit test paths.
-  if (EDIT_TOOLS.has(tool) && agentType === QA_AGENT && !isTestPath(editTarget(input), cwd)) {
+  if (EDIT_TOOLS.has(tool) && agentType === QA_AGENT && !scratch && !isTestPath(editTarget(input), cwd)) {
     denies.push({ rule: 'qa-test-paths-only', reason: QA_REASON });
   }
 
@@ -366,7 +380,7 @@ export function decide(payload, state = null) {
 
   // v0.2: same-group edit deny.
   safe(() => {
-    if (!EDIT_TOOLS.has(tool) || !agentType || !agentType.startsWith('agent-org:') || !ledger || !session) return;
+    if (!EDIT_TOOLS.has(tool) || !specialist || scratch || !ledger || !session) return;
     const me = typeof payload.agent_id === 'string' ? payload.agent_id : null;
     const target = editTarget(input);
     if (!me || !target) return;
@@ -414,7 +428,7 @@ export function decide(payload, state = null) {
 
   // v0.2: scope growth (main thread only).
   safe(() => {
-    if (!EDIT_TOOLS.has(tool) || agentType || !session) return;
+    if (!EDIT_TOOLS.has(tool) || agentType || scratch || !session) return;
     const target = editTarget(input);
     if (!target) return;
     const abs = resolvePath(target, cwd);

@@ -6,6 +6,7 @@
 //                                              of an already approved intent outside the status line, approval log,
 //                                              evidence or validation is audited `intent-edited-after-approval` (F6)
 //   Agent                                    → dispatch record {promptId, toolUseId, agentType, teammate} + audit `dispatch`
+//   (v0.2e) edits under the payload's scratchpad_dir are neither ledgered nor counted (V-4)
 //   SubagentHandback                         → A2 report-contract check (PM exempt, F9); audit `claim-flag` if it fails
 // Agent identity goes through effectiveType() (v0.2c, F1): teammates carry agent_type = their name.
 // CLI: node record.mjs --ledger [--session <id>]  prints the per-agent file summary and collision flags.
@@ -20,7 +21,7 @@ import {
 } from './lib/state.mjs';
 import { repoName, repoOfFile, repoRoot } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
-import { riskyKinds } from './guard.mjs';
+import { inScratchpad, riskyKinds } from './guard.mjs';
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
 const PM = 'agent-org:principal-project-manager';
@@ -32,6 +33,17 @@ export function parseOutcome(text) {
   const first = text.split('\n').find((l) => l.trim()) || '';
   const m = OUTCOME_RE.exec(first);
   return m ? m[1] : null;
+}
+
+// v0.2e (V-2): the last `Outcome:` line anywhere in the report, for a report whose first line has none.
+export function lastOutcome(text) {
+  if (typeof text !== 'string') return null;
+  const lines = text.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = OUTCOME_RE.exec(lines[i]);
+    if (m) return m[1];
+  }
+  return null;
 }
 
 const STATUS_APPROVED = /^\s*\*\*Status:\*\*\s*APPROVED\s*$/m;
@@ -94,6 +106,7 @@ export function record(payload) {
   if (EDIT_TOOLS.has(tool)) {
     const target = input.file_path || input.notebook_path;
     if (typeof target !== 'string' || !target) return;
+    if (inScratchpad(payload, target)) return; // v0.2e (V-4): scratch space isn't ledgered or counted
     const abs = resolvePath(target, cwd);
     if (agentType) {
       if (agentType.startsWith('agent-org:')) {
