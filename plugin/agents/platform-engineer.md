@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
 model: sonnet
 ---
 
-<!-- agent-org:canonical:begin source=agent-personas@6d13ca61f0b556c53623bf056a4ff272024ce046 path=agents/platform-engineer.md -->
+<!-- agent-org:canonical:begin source=agent-personas@d4841d7a9d76c6ba4e7994382cb7c05b86c2c5ae path=agents/platform-engineer.md -->
 # Platform Engineer
 
 **Agent ID:** `platform-engineer`  

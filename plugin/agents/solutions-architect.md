@@ -5,7 +5,7 @@ tools: Read, Grep, Glob, WebFetch, WebSearch
 model: opus
 ---
 
-<!-- agent-org:canonical:begin source=agent-personas@6d13ca61f0b556c53623bf056a4ff272024ce046 path=agents/solutions-architect.md -->
+<!-- agent-org:canonical:begin source=agent-personas@d4841d7a9d76c6ba4e7994382cb7c05b86c2c5ae path=agents/solutions-architect.md -->
 # Solutions Architect
 
 **Agent ID:** `solutions-architect`  
