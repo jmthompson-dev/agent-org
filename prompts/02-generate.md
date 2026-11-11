@@ -107,12 +107,12 @@ model: <see table>
 - **No agent gets `Agent`** (D2). Never use `inherit` (D8).
 - Don't use frontmatter that Phase 1 says plugin agents ignore (`permissionMode`, `hooks`, `mcpServers`, `initialPrompt`).
 
-**Descriptions** load into every session, so keep them short:
-- One or two sentences: what the agent owns, when to use it, and what it does *not* own.
-- The PM description must make it the escalation entry point: "Use for Level 2+ work: classifies the task, writes the intent document, and assigns specialists. Does not edit code or dispatch agents."
-- Specialists: "Dispatched from an approved agent-org intent." This discourages ad-hoc spawning at Levels 0–1.
-- The infra trio must use the D16 split, with the ownership tie-breakers spelled out.
-- **(v0.2.1) Every exclusion names its owner:** each "does not" names the agent id that owns that work instead, in parentheses (or "the implementing engineer" / "the user" when it depends on the task). The PM routes on the description alone, so an exclusion with no owner leaves a gap.
+**Descriptions** load into every session, so keep them short. **(v0.2.1) They're built from the persona, not written here:**
+- Form: `Use for <use> <agent-org clause> Not for <not>`, where `<use>` and `<not>` are the persona's `**Use for:**` and `**Not for:**` header lines at `PIN` with markdown (backticks, bold) stripped. Don't reword them; if one looks wrong, report it and fix it in agent-personas.
+- The agent-org clause is the only part written here:
+  - Specialists: "Dispatched from an approved agent-org intent." This discourages ad-hoc spawning at Levels 0–1. Advisory architects add "; advisory" (solutions-architect: "; advisory only"). QA and TPM add "or /agent-org:release-validation", InfoSec "or /agent-org:security-audit". QA, TPM and InfoSec name their finding prefix first ("Reports QA findings and writes tests only.", "Reports PROD findings.", "Reports SEC findings.").
+  - PM: "Agent-org escalation entry point for all Level 2+ work; the plan is the intent document. Never dispatches agents."
+- Every `Not for` names the owner of the excluded work, so the PM can route on the description alone; the infra trio's lines carry the D16 split. Both are the persona repo's job; `sync-personas.mjs --check` reports `DESC` when a description stops matching.
 
 **Runtime binding** (under 250 words each, **the PM under 300 (v0.2)**, so it keeps the typical team cases; bindings load only when the agent is spawned; it complements the persona and never contradicts it):
 - The tools actually granted, and what is **enforced** (the tool list) versus **instruction-only** (e.g. "only write tests" when `Write` is granted). Be honest about the gaps.
@@ -292,7 +292,8 @@ All dependency-free Node, cross-platform, fail-open, and exporting their functio
 ### 6. `scripts/sync-personas.mjs`
 Node, dependency-free, cross-platform. It never fetches, pulls or modifies `agent-personas`.
 - `--check` (the default): for each agent, compare the canonical block with `git show <pinned commit>:agents/<id>.md`. Report `OK`, `DRIFT`, `MISSING` or `NEW`. Also report whether the persona repo's local `metadata.personasBranch` ref (`main`), and its `production` ref if one exists, are ahead of the pin; a missing `production` ref is reported, not an error.
-- `--bump <sha>`: rewrite **only** the canonical blocks, their `source=` stamps and `plugin.json` `metadata.personasCommit`. Leave frontmatter and runtime bindings untouched.
+- `--bump <sha>`: rewrite **only** the canonical blocks, their `source=` stamps, `plugin.json` `metadata.personasCommit`, and **(v0.2.1)** the Use for / Not for parts of each description, keeping the agent-org clause between them. If a description fits neither the new nor the old pin's persona lines, stop and write nothing. Leave the rest of the frontmatter and the runtime bindings untouched.
+- **(v0.2.1)** `--check` also reports `DESC` when a description doesn't start with the persona's Use for text and end with its Not for text.
 - Write to temporary files and rename, so a failure never truncates an agent file. Running it twice must change nothing. Exit non-zero on drift in `--check`.
 - The persona repo path defaults to `~/git/agent-personas` and can be overridden with `--personas <path>`.
 

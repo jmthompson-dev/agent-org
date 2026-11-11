@@ -78,9 +78,11 @@ Without an approval recorded in this session for the repo, a main-thread edit th
 From the repo root, not shipped in the plugin:
 
 ```bash
-node scripts/sync-personas.mjs --check            # OK / DRIFT / MISSING / NEW, and whether the persona branch is ahead of the pin
-node scripts/sync-personas.mjs --bump <sha>       # rewrite only canonical blocks + plugin.json personasCommit
+node scripts/sync-personas.mjs --check            # OK / DRIFT / MISSING / NEW / DESC, and whether the persona branch is ahead of the pin
+node scripts/sync-personas.mjs --bump <sha>       # rewrite canonical blocks, plugin.json personasCommit, and the persona parts of each description
 ```
+
+Agent descriptions read `Use for <persona's Use for> <agent-org clause> Not for <persona's Not for>`. Change routing text in agent-personas, then bump; `DESC` means a description no longer matches its persona.
 
 `--personas <path>` overrides the default `~/git/agent-personas`. The script never fetches or modifies the persona repo.
 

@@ -11,10 +11,17 @@
 //   DRIFT   block content or source= stamp differs from the pin
 //   MISSING agent file has no canonical block, or the persona does not exist at the pin
 //   NEW     persona exists at the pin but the plugin has no agent file for it
+//   DESC    the agent's frontmatter description doesn't match the persona's
+//           **Use for:** / **Not for:** header lines. The description must read
+//           "Use for <use> <agent-org clause> Not for <not>" (markdown stripped);
+//           the middle clause is agent-org's own and isn't checked.
 //   Also reports whether the persona repo's local metadata.personasBranch ref and `production` ref are ahead of the pin.
 //   Exits 1 on any non-OK status.
-// --bump <sha>: rewrite only the canonical blocks, their source= stamps and
-//   plugin.json metadata.personasCommit. Frontmatter and runtime bindings are untouched.
+// --bump <sha>: rewrite only the canonical blocks, their source= stamps,
+//   plugin.json metadata.personasCommit, and the Use for / Not for parts of each
+//   description (the agent-org middle clause is kept). If a description follows
+//   neither the new nor the old pin's persona lines, the bump stops and writes nothing.
+//   Runtime bindings and the rest of the frontmatter are untouched.
 //   Writes go to temp files that are then renamed. Running it twice changes nothing.
 //
 // This script never fetches, pulls or modifies the persona repo. It only runs
@@ -102,6 +109,28 @@ function agentFiles() {
 }
 
 const lf = (s) => s.replace(/\r\n/g, '\n');
+
+const FM_DESC_RE = /^description: "(.*)"$/m;
+const plainMd = (s) => s.replace(/`/g, '').replace(/\*\*/g, '');
+
+// The persona's routing lines, as the prefix and suffix its agent description must carry.
+function personaRouting(persona) {
+  const use = persona.match(/^\*\*Use for:\*\* (.+?)\s*$/m);
+  const not = persona.match(/^\*\*Not for:\*\* (.+?)\s*$/m);
+  if (!use || !not) return null;
+  return { prefix: `Use for ${plainMd(use[1])} `, suffix: ` Not for ${plainMd(not[1])}` };
+}
+
+const fitsRouting = (d, r) =>
+  d.startsWith(r.prefix) && d.endsWith(r.suffix) && d.length > r.prefix.length + r.suffix.length;
+
+function descriptionProblem(text, persona) {
+  const r = personaRouting(persona);
+  if (!r) return 'persona has no Use for / Not for lines';
+  const m = text.match(FM_DESC_RE);
+  if (!m) return 'no description line';
+  return fitsRouting(m[1], r) ? null : 'description does not match persona Use for / Not for';
+}
 const withTrailingNewline = (s) => (s.endsWith('\n') ? s : `${s}\n`);
 
 function renderBlock(sha, id, body) {
@@ -152,6 +181,8 @@ function check(opts) {
       rows.push([id, 'DRIFT', `source stamp ${stamp} != pin`]);
     } else if (lf(content) !== withTrailingNewline(persona)) {
       rows.push([id, 'DRIFT', 'block content differs from persona at pin']);
+    } else if (descriptionProblem(text, persona)) {
+      rows.push([id, 'DESC', descriptionProblem(text, persona)]);
     } else {
       rows.push([id, 'OK', '']);
     }
@@ -191,6 +222,7 @@ function bump(opts) {
   const sha = resolveCommit(opts.personas, opts.sha);
   const agents = agentFiles();
   if (agents.length === 0) throw new Error(`no agent files in ${AGENTS_DIR}`);
+  const oldPin = (readPluginJson().metadata || {}).personasCommit || null;
 
   // Prepare every change first; write nothing if any agent fails.
   const pending = [];
@@ -201,7 +233,23 @@ function bump(opts) {
     if (!m) throw new Error(`${id}: no canonical block; refusing to guess where it goes`);
     const persona = personaAt(opts.personas, sha, id);
     if (persona === null) throw new Error(`${id}: agents/${id}.md does not exist at ${sha}`);
-    const next = text.slice(0, m.index) + renderBlock(sha, id, persona) + text.slice(m.index + m[0].length);
+    let next = text.slice(0, m.index) + renderBlock(sha, id, persona) + text.slice(m.index + m[0].length);
+
+    const r = personaRouting(persona);
+    if (!r) throw new Error(`${id}: persona at ${sha} has no Use for / Not for lines`);
+    const dm = next.match(FM_DESC_RE);
+    if (!dm) throw new Error(`${id}: no description line in frontmatter`);
+    if (!fitsRouting(dm[1], r)) {
+      const oldPersona = oldPin ? personaAt(opts.personas, oldPin, id) : null;
+      const o = oldPersona && personaRouting(oldPersona);
+      if (!o || !fitsRouting(dm[1], o)) {
+        throw new Error(`${id}: description follows neither the new nor the old persona's Use for / Not for; fix it by hand, then bump`);
+      }
+      const middle = dm[1].slice(o.prefix.length, dm[1].length - o.suffix.length);
+      const desc = r.prefix + middle + r.suffix;
+      if (/["\\]/.test(desc)) throw new Error(`${id}: description would contain a quote or backslash`);
+      next = next.replace(FM_DESC_RE, () => `description: "${desc}"`);
+    }
     if (next !== text) pending.push([file, next]);
   }
 
