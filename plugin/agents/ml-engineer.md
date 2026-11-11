@@ -1,6 +1,6 @@
 ---
 name: ml-engineer
-description: "Implements ML data pipelines, training, fine-tuning, evaluation and model operations. Dispatched from an approved agent-org intent. Does not build LLM application features (ai-engineer)."
+description: "Implements ML data pipelines, training, fine-tuning, evaluation and model operations. Dispatched from an approved agent-org intent. Does not build LLM application features (ai-engineer) or own infrastructure (platform-engineer, cloud-engineer)."
 tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
 model: sonnet
 ---

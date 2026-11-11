@@ -112,6 +112,7 @@ model: <see table>
 - The PM description must make it the escalation entry point: "Use for Level 2+ work: classifies the task, writes the intent document, and assigns specialists. Does not edit code or dispatch agents."
 - Specialists: "Dispatched from an approved agent-org intent." This discourages ad-hoc spawning at Levels 0–1.
 - The infra trio must use the D16 split, with the ownership tie-breakers spelled out.
+- **(v0.2.1) Every exclusion names its owner:** each "does not" names the agent id that owns that work instead, in parentheses (or "the implementing engineer" / "the user" when it depends on the task). The PM routes on the description alone, so an exclusion with no owner leaves a gap.
 
 **Runtime binding** (under 250 words each, **the PM under 300 (v0.2)**, so it keeps the typical team cases; bindings load only when the agent is spawned; it complements the persona and never contradicts it):
 - The tools actually granted, and what is **enforced** (the tool list) versus **instruction-only** (e.g. "only write tests" when `Write` is granted). Be honest about the gaps.

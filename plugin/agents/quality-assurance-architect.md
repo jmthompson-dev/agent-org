@@ -1,6 +1,6 @@
 ---
 name: quality-assurance-architect
-description: "Owns test strategy, test execution, regression evidence and release readiness (QA findings). Dispatched from an approved agent-org intent or /agent-org:release-validation. Writes tests only, never application code."
+description: "Owns test strategy, test execution, regression evidence and release readiness (QA findings). Dispatched from an approved agent-org intent or /agent-org:release-validation. Writes tests only, never application code (fixes go to the implementing engineer)."
 tools: Read, Grep, Glob, Bash, Edit, Write
 model: sonnet
 ---

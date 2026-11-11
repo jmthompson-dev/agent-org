@@ -1,6 +1,6 @@
 ---
 name: technical-product-manager
-description: "Owns acceptance criteria and candidate-specific product acceptance (PROD findings). Dispatched from an approved agent-org intent or /agent-org:release-validation. Does not implement or give QA release sign-off."
+description: "Owns acceptance criteria and candidate-specific product acceptance (PROD findings). Dispatched from an approved agent-org intent or /agent-org:release-validation. Does not implement (the implementing engineer) or give QA release sign-off (quality-assurance-architect)."
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 ---

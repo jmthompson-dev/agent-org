@@ -1,6 +1,6 @@
 ---
 name: full-stack-developer
-description: "Implements and tests application features across frontend, backend, APIs and database migrations. Dispatched from an approved agent-org intent. Does not own CI/CD, infrastructure or LLM integration."
+description: "Implements and tests application features across frontend, backend, APIs and database migrations. Dispatched from an approved agent-org intent. Does not own CI/CD (devops-engineer), infrastructure (platform-engineer, cloud-engineer) or LLM integration (ai-engineer)."
 tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
 model: sonnet
 ---

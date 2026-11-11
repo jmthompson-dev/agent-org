@@ -1,6 +1,6 @@
 ---
 name: ai-engineer
-description: "Implements LLM and agent features: tool adapters, retrieval, structured output, provider abstraction and stubbed evals. Dispatched from an approved agent-org intent. Does not train models (ml-engineer) or own infrastructure."
+description: "Implements LLM and agent features: tool adapters, retrieval, structured output, provider abstraction and stubbed evals. Dispatched from an approved agent-org intent. Does not train models (ml-engineer) or own infrastructure (platform-engineer, cloud-engineer)."
 tools: Read, Grep, Glob, Bash, Edit, Write, WebFetch, WebSearch
 model: sonnet
 ---

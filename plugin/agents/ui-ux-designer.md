@@ -1,6 +1,6 @@
 ---
 name: ui-ux-designer
-description: "Owns user flows, interaction and visual design specs, and accessibility review. Dispatched from an approved agent-org intent. Does not implement application code or set product scope."
+description: "Owns user flows, interaction and visual design specs, and accessibility review. Dispatched from an approved agent-org intent. Does not implement application code (full-stack-developer) or set product scope (technical-product-manager)."
 tools: Read, Grep, Glob, Edit, Write, WebFetch
 model: sonnet
 ---
