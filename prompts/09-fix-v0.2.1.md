@@ -2,6 +2,8 @@
 
 v0.2.0 is tagged and pushed (`616d43a`). v0.2.1 fixes the ten items in `docs/v0.2-plan.md` § v0.2.1 backlog (V21-1 to V21-10). Nothing else: no level-choice work, no memory, no new features. If a fix starts turning into a redesign, stop and ask.
 
+**Already landed on `development` (part of v0.2.1, don't redo or revert):** agent descriptions are now built from each persona's `**Use for:**` / `**Not for:**` lines (`4ebfb6d`, `903e4ef`, `e2d959d`). The persona pin is `agent-personas@12a0c9c`, `sync-personas.mjs` reports `DESC` when a description stops matching its persona and rewrites the persona parts on `--bump`, and the PM description wording changed. 02-generate already mirrors this. Treat it as the starting state: record it in the Part 1 report, and validate it in Part 2.
+
 Work in three parts and **stop after each**:
 1. Generate: spec and code changes, unit tests, version bump
 2. Validate: headless checks, cost-gated
@@ -47,9 +49,10 @@ Apply the fixes as specified in the release checklist report §6. Where it leave
 - **Tests:** unit tests for every changed hook path, with each V21 item tested by name. Run the full suite.
 - **Checks:** `claude plugin validate ./plugin` passes, and `sync-personas --check` reports 14 × OK.
 - **Version:** bump `plugin.json` to `0.2.1`.
-- **Decisions:** add a note to each affected decision in `docs/decisions.md`. Add a new decision only for the repo key and the intent identity.
+- **Decisions:** add a note to each affected decision in `docs/decisions.md`. Add new decisions only for the repo key, the intent identity, and descriptions sourced from the persona's Use for / Not for lines (already landed; record it).
 - **Report:** write `reports/02-generate-v0.2.1-<YYYY-MM-DD>.md`:
   - what changed per V21 item, with spec and code locations
+  - the already-landed description change, confirmed against the spec
   - the intent reader and writer list, and the cross-repo answer
   - the migration proposal
   - test results
@@ -69,6 +72,7 @@ Show the plan and a cost estimate (well under $5), then wait for my go-ahead. Us
 - **V21-1:** replay the six false-block cases from 6c through `claim-check` and confirm none blocks, plus one true claim with no evidence that still blocks.
 - **V21-2:** the specialist ask-list deny and the QA path deny each write a `guard-deny` audit line.
 - **V21-3:** a Level 2 job reaches VERIFIED, and the main thread offers a commit instead of attempting one.
+- **Descriptions (already landed):** with the new PM description, a clearly Level 2 prompt still loads `agent-org:deliver` and dispatches `agent-org:principal-project-manager`, and the PM picks only specialists whose triggers fired, by roster id. Run it 3 times. If escalation drops, stop and report before Part 3. Also confirm `sync-personas --check` flags a hand-tampered description as `DESC` in a scratch copy.
 - **Regression:** the Phase 6 headless checks still pass.
 - **Report:** write `reports/09-validate-v0.2.1-<YYYY-MM-DD>.md`: pass/fail per check with evidence, cost, cleanup and isolation confirmation. **Stop.**
 
