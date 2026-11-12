@@ -81,8 +81,8 @@ async function main() {
 
   const additionalContext =
     `agent-org: escalation triggers matched (${groups.join(', ')}). ` +
-    'This may be Level 2+ — consider loading the `agent-org:deliver` skill. ' +
-    'If it is clearly Level 0–1, proceed normally.';
+    'This may be Level 2+: answer those triggers in the level check before any file edit (unsure counts as yes), ' +
+    'and load the `agent-org:deliver` skill if it maps to Level 2+. A question with no edits needs no check.';
   const out = JSON.stringify({ hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext } });
   // Wait for the flush: process.exit() right after a pipe write can drop output.
   await new Promise((resolve) => process.stdout.write(out, () => resolve()));

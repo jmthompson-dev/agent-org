@@ -23,11 +23,17 @@ claude plugin install agent-org@agent-org
 | Level | What | Handling |
 |---|---|---|
 | 0 | Question, lookup, docs typo | Main thread, no agents |
-| 1 | ≤ ~2 files, no trigger | One-line plan, then do it |
-| 2 | > ~2 files or modules, API/contract, schema/migration, dependency, auth, secrets, CI/CD or infra, cross-service, user-visible behavior | PM → intent → **your approval** → triggered specialists |
-| 3 | Auth redesign, sensitive data, prod data migration, multi-service architecture, prod release, major AI/ML platform work | Level 2 + independent QA and InfoSec, durable evidence, approval before release |
+| 1 | ≤ 2 files, no trigger; copy-only text changes; bug fixes that restore intended behavior | Level check, then do it and run the tests |
+| 2 | > 2 files or modules, API/contract, schema/migration, dependency, auth, secrets, CI/CD or infra, cross-service, user-visible behavior (what the user can do or what the system returns) | PM → intent → **your approval** → triggered specialists |
+| 3 | Auth redesign, sensitive data, prod data migration (moving, transforming, deleting or backfilling existing production data), multi-service architecture, prod release, major AI/ML platform work | Level 2 + independent QA and InfoSec, durable evidence, approval before release |
 
-A trigger sets the minimum level.
+A trigger sets the minimum level, and unsure counts as yes.
+
+**Level check (v0.2.2).**
+- **The call:** before the first file edit of each request, the main thread runs `node <plugin>/hooks/record.mjs --level-check "files=n api=n …"`, answering the 15 Level 2 and Level 3 triggers with y, n or ? (unsure).
+- **The mapping:** a fixed function maps the answers. Any Level 3 y/? gives 3; else any Level 2 y/? gives 2; else 1.
+- **What the guard does:** it records the check for that request (`prompt_id`) and audits a `level` event (the level, its source and the answers as booleans). It lets this one command run without a prompt, denies the check when it's chained with other commands ("run it as its own call"), and denies an edit in the repo when the check is missing or maps to Level 2+. `files` also takes a file count (more than 2 → yes).
+- **D4:** a later check never lowers a request's level.
 
 ## Intent files
 
@@ -48,7 +54,7 @@ Prompt text, commands and file paths are never logged.
 ## Verification at every level
 
 - **Claim check** (`Stop`, every level): a sentence in Claude's final message that claims verification ("tests pass", "I ran", "build succeeds", "verified", "no errors", "N/N passed") needs a successful matching command in the same turn (in a turn with no tool calls, or whose only calls save the intent, the previous turn's command counts). Relayed specialist claims (every word, bar a few fillers like "the" and "other", found in one sentence of a specialist's report, from an agent whose stop passed its check, or a teammate's idle report), quoted text, and negated ("none of", "not yet"; judged per `;` clause), hypothetical, future-tense, hedged or estimated sentences ("roughly", "probably", "chance") are skipped, as are status lines ("Status:", "marked VERIFIED"), "verified" as an adjective ("the verified fix"), purpose clauses ("Goal:", "so that") and list items whose bold label is hedged or negated ("**Likely cause (not run yet):**").
-- **Citation check:** every `path:line` citation in the final message must name a file opened this session (Read, Edit, Write, NotebookEdit, or a single-purpose `cat`/`head`/`tail`/`sed -n`/`grep`/`rg`/`nl`) or seen in successful Grep, Glob or Bash output, by the main thread or a specialist. Bare paths, planned files, URL routes and negated or future-tense sentences aren't checked. It catches invented or unopened files cited with a line, not misread lines.
+- **Citation check:** every `path:line` citation in the final message must name a file opened this session (Read, Edit, Write, NotebookEdit, or a single-purpose `cat`/`head`/`tail`/`sed -n`/`grep`/`rg`/`nl`) or seen in successful Grep, Glob or Bash output (including the file of a single-file Grep that shows numbered lines), or as a `path:line` pair in Read output, by the main thread or a specialist. Bare paths, planned files, URL routes and negated or future-tense sentences aren't checked. It catches invented or unopened files cited with a line, not misread lines.
 - **Block once:** a failed check continues the turn with the reason (shown as "Stop hook feedback"); on the second stop it only warns.
 - **Report contract** (`SubagentStop`, `SubagentHandback`): agent-org specialists start their report with `Outcome: PASS | FAIL | BLOCKED | SKIPPED | NOT RUN`, and a PASS needs a successful command in their own transcript (for agents with no shell, any successful tool call). When a specialist reports through `SubagentHandback`, the report is read from that message. If the first line has no outcome, the last `Outcome:` line is used and the missing first line is flagged separately. The PM is exempt: it returns an intent, saved as is.
 - **Level 3:** the independent QA reviewer reproduces the key claims before VERIFIED (a fresh QA instance if the reviewer wrote code or tests in the job). No extra auditor agent.
@@ -67,11 +73,21 @@ Hooks append to `~/.agent-org/audit/<repo key>.jsonl` (v0.2.0 logs named by the 
 
 ## Scope guard
 
-Without an approval recorded in this session for the repo (matched by repo key), a main-thread edit that would make more than 3 distinct files edited, or the first edit of each kind (migration, CI, IaC/k8s/helm, auth) to a risky path, gets an `ask`; once an edit of a kind has gone through, later files of that kind don't ask again. Approving an intent (`**Status:** APPROVED`) records the approval for the session: it survives resume and compaction, not `/clear` or a fork.
+**In the working directory's repo (v0.2.2):** without an approval recorded in this session for the repo, a main-thread edit is **denied** in any of these cases:
+- the request has no level check;
+- the check maps to Level 2+;
+- the edit would be the request's third file;
+- the edit touches a risky path (migration, CI, IaC/k8s/helm, auth).
+
+The last two raise the request to Level 2 (a `level` event with source `floor`). Files are counted per request (`prompt_id`). Errors fail open.
+
+**Other repos, and payloads without a `prompt_id`:** a main-thread edit that would make more than 3 distinct files edited in the session, or the first edit of each risky kind, gets an `ask`. Once an edit of a kind has gone through, later files of that kind don't ask again.
+
+**Exempt:** paths outside the working directory's repo from the level gate, and `~/.agent-org/` and the scratchpad from both. Approving an intent (`**Status:** APPROVED`) records the approval for the session: it survives resume and compaction, not `/clear` or a fork.
 
 ## State files
 
-`~/.agent-org/state/<session_id>/` holds approvals, the scope counter, risky kinds seen, dispatch and finish records, and the edit ledger; `~/.agent-org/state/audit-<repo key>.head` holds the audit head records. Safe to delete when no session is running: deleting resets approvals and counters, and a deleted head record means the next check can't detect tail edits made before it.
+`~/.agent-org/state/<session_id>/` holds approvals, the scope counter, risky kinds seen, level checks and per-request files, dispatch and finish records, and the edit ledger; `~/.agent-org/state/audit-<repo key>.head` holds the audit head records. Safe to delete when no session is running: deleting resets approvals and counters, and a deleted head record means the next check can't detect tail edits made before it.
 
 ## Persona sync (maintainers)
 
@@ -88,7 +104,7 @@ Agent descriptions read `Use for <persona's Use for> <agent-org clause> Not for 
 
 ## Enforcement
 
-**Enforced by the `PreToolUse` guard** (`hooks/guard.mjs`). It only ever returns `ask` or `deny`, never `allow`, and fails open:
+**Enforced by the `PreToolUse` guard** (`hooks/guard.mjs`). It returns `ask` or `deny`, and fails open. Its one `allow` is for the main thread's exact level-check command (v0.2.2), which only prints the level the answers map to:
 - **Risky shell commands → ask (main thread) or deny (agent-org specialists).** Bash and PowerShell commands are split on `&&`, `||`, `;`, `|`, `&`, `$(…)` and backticks, and normalized (env assignments, `sudo`/`timeout`/`env`-style wrappers, absolute executable paths, `git -C`/`--git-dir`, `sh -c`, `eval`, `pwsh -Command`/`-EncodedCommand`). Any segment matching git `commit`/`push`/`merge`/`rebase`/`reset --hard`/`clean`/`tag`/`branch -D`, `gh pr create|merge`, `gh release create`, `gh repo delete`, kubectl/helm/terraform mutations, gcloud/aws/az create/delete/update/deploy, `cf push|delete`, `rm -r` or `Remove-Item -Recurse` asks first, naming the pattern. From an agent-org specialist (subagent or teammate) the same match is denied: specialists may run in auto permission mode, where an ask may never reach you, so they report the command and the main thread asks.
 - **QA edits only tests.** `Edit`/`Write`/`NotebookEdit` calls from `agent-org:quality-assurance-architect` are denied unless the path is a test path (`test/`, `tests/`, `__tests__/`, `spec/`, `specs/`, `fixtures/`, `testdata/`, `src/test/`, `*.test.*`, `*.spec.*`, `*_test.*`, `test_*.*`). QA reports the needed change instead.
 - **Parallel collisions, teams, the audit log and scope growth** (v0.2): the same-group edit deny, the team gate, an `ask` on tool calls that touch `~/.agent-org/audit/` or `~/.agent-org/state/`, and the scope guard, described above.

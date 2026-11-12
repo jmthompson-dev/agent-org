@@ -32,6 +32,8 @@ async function main() {
   const here = path.dirname(fileURLToPath(import.meta.url));
   let card = '';
   try { card = fs.readFileSync(path.join(here, 'rule-card.md'), 'utf8').trim(); } catch { card = ''; }
+  // v0.2.2 (D34): the level-check command names this plugin's own record.mjs.
+  card = card.split('{{AGENT_ORG_ROOT}}').join(path.dirname(here));
   const warning = await auditWarning();
   if (!card && !warning) return finish();
   const out = {};

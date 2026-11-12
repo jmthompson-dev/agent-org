@@ -4,7 +4,7 @@ import path from 'node:path'; import { spawnSync } from 'node:child_process'; im
 const here = path.dirname(fileURLToPath(import.meta.url));
 const extra = process.argv.slice(2);
 let failed = 0;
-for (const [file, args] of [['v021.test.mjs', []], ['replay-6c.mjs', extra]]) {
+for (const [file, args] of [['v021.test.mjs', []], ['v022.test.mjs', []], ['replay-6c.mjs', extra]]) {
   console.log(`\n=== ${file}`);
   const r = spawnSync(process.execPath, [path.join(here, file), ...args], { stdio: 'inherit' });
   if (r.status !== 0) failed++;

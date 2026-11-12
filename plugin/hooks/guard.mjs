@@ -24,7 +24,19 @@
 //   (v0.2.1, V21-9) Approvals, scope and audit lines are keyed by the repo key (lib/repo.mjs), not the D6 name.
 // Agent identity goes through effectiveType() (v0.2c, F1): teammate hooks carry agent_type = the teammate's
 // name, and the dispatch record maps their agent_id back to the agent-org type.
-// Decisions combine: any deny wins, else any ask (reasons joined). It never returns `allow`.
+//  10. (v0.2.2, D34) Level check: a main-thread Bash call that is exactly
+//      `node <this plugin>/hooks/record.mjs --level-check "<answers>" [--source deliver|pm]` is recorded for the
+//      payload's prompt_id (the level never goes down within a request, D4), audited as a `level` event, and
+//      returns `allow`: the only allow the guard gives, for one fixed, side-effect-free command shape.
+//      A command that runs record.mjs --level-check but isn't that shape on its own (chained, piped, wrapped) is
+//      denied with "run the level check as its own call" (Phase 10 Part 3: chained checks were never recorded).
+//  11. (v0.2.2, D34, amends D28 for the main thread) Level gate: a main-thread edit inside the cwd's repo, with a
+//      prompt_id and no approval for the repo, is denied when this request has no level check, when the check maps to
+//      Level 2+, when it would be the request's third file, or when it hits a risky path (each of the last two
+//      raises the request to Level 2, audited as a `level` event with source `floor`). Paths outside the cwd's repo
+//      (other repos, ~/.agent-org, the scratchpad) are exempt; other repos and payloads without a prompt_id keep
+//      rule 6.
+// Decisions combine: any deny wins, else any ask (reasons joined). The only `allow` is rule 10's.
 // Rules 3, 4 and 6 (and teammate identity) read session state and fail open when it is missing or unreadable.
 // Rule 9 reads only the existing intent file and fails open when it can't.
 // Dependency-free and fail-open: any error produces no output and exit code 0.
@@ -37,10 +49,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   appendLedger, approvalFor, effectiveType, home, intentMeta, isUnder, orgSubdir, readLedger, readState,
-  realpathLoose, resolvePath,
+  realpathLoose, resolvePath, updateState,
 } from './lib/state.mjs';
 import { repoId, repoIdOfFile } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
+import {
+  answerFlags, levelFromAnswers, parseAnswers, questionList, raise, RISKY_KEY, TEMPLATE, triggered,
+} from './lib/level.mjs';
 
 const DEBUG_FILE = path.join(os.homedir(), '.claude', 'agent-org', 'hook-debug.jsonl');
 const QA_AGENT = 'agent-org:quality-assurance-architect';
@@ -323,6 +338,65 @@ export function riskyKinds(relPath) {
   return kinds;
 }
 
+// ---------------------------------------------------------------------------------------------
+// v0.2.2 (D34): the level check
+
+const HOOKS_DIR = path.dirname(fileURLToPath(import.meta.url));
+export const RECORD_SCRIPT = path.join(HOOKS_DIR, 'record.mjs');
+const CHECK_SOURCES = new Set(['deliver', 'pm']);
+
+// The exact command the main thread runs for the level check, with every ? for the model to fill in.
+export const levelCheckCommand = () => `node "${RECORD_SCRIPT}" --level-check "${TEMPLATE}"`;
+
+// {answers, source} when `command` is exactly `node <this plugin's record.mjs> --level-check "<answers>"`
+// [--source deliver|pm], with well-formed answers; else null. No other segment, redirect or substitution.
+export function levelCheckCall(command) {
+  if (typeof command !== 'string' || command.length > 2000 || /[;&|`$<>\n\r]/.test(command)) return null;
+  // The raw first word must be node itself: commandSegments strips env prefixes and wrappers (`FOO=1`, `env`,
+  // `nice`), and NODE_OPTIONS=--require=… would run other code under this allow.
+  const first = /^\s*(?:"([^"]*)"|'([^']*)'|(\S+))/.exec(command);
+  const exe = first ? (first[1] ?? first[2] ?? first[3]) : '';
+  if (!/^node(?:\.exe)?$/i.test(path.basename(exe))) return null;
+  let segs;
+  try { segs = commandSegments(command, true); } catch { return null; }
+  if (segs.length !== 1) return null;
+  const w = segs[0];
+  if (w.length !== 4 && w.length !== 6) return null;
+  if (!/^node(?:\.exe)?$/i.test(path.basename(w[0]))) return null;
+  if (w[2] !== '--level-check') return null;
+  let script;
+  try { script = realpathLoose(path.resolve(w[1])); } catch { return null; }
+  if (!samePath(script, realpathLoose(RECORD_SCRIPT))) return null;
+  const answers = parseAnswers(w[3]);
+  if (!answers) return null;
+  let source = 'checklist';
+  if (w.length === 6) {
+    if (w[4] !== '--source' || !CHECK_SOURCES.has(w[5])) return null;
+    source = w[5];
+  }
+  return { answers, source };
+}
+
+// v0.2.2 (Phase 10 Part 3: 11 of 33 jobs chained the check with git calls, so nothing was recorded): true when the
+// command runs a record.mjs with --level-check but isn't the allowed shape on its own: chained, piped, redirected,
+// substituted, or behind an env prefix or wrapper. A single, plain call with malformed answers is not this: the CLI
+// prints the questions for it.
+export function chainedLevelCheck(command) {
+  if (typeof command !== 'string' || !command.includes('--level-check')) return false;
+  let segs;
+  try { segs = commandSegments(command, true); } catch { return false; }
+  const isCheck = (w) => w.some((x, i) => i > 0 && x === '--level-check' && w.slice(0, i).some((y) => path.basename(y) === 'record.mjs'));
+  if (!segs.some(isCheck)) return false;
+  const first = /^\s*(?:"([^"]*)"|'([^']*)'|(\S+))/.exec(command);
+  const exe = first ? (first[1] ?? first[2] ?? first[3]) : '';
+  return segs.length !== 1 || /[;&|`$<>\n\r]/.test(command) || !/^node(?:\.exe)?$/i.test(path.basename(exe));
+}
+export const CHAINED_REASON = 'agent-org guard: run the level check as its own call: one Bash call that is only `node "<plugin>/hooks/record.mjs" --level-check "<answers>"` (optionally `--source deliver|pm`), with nothing chained before or after it (no ;, &&, |, cd or other commands) and no env prefix. Then run the other commands separately.';
+
+const promptIdOf = (payload) => (typeof payload.prompt_id === 'string' && payload.prompt_id ? payload.prompt_id : null);
+
+export const LEVEL_MISSING_REASON = () => `agent-org guard: this request has no level check, so the edit is denied. Before the first file edit of each request, run exactly one Bash call: ${levelCheckCommand()} with each ? set to y, n or ? (unsure counts as yes). ${questionList()} Any Level 3 y/? → Level 3; else any Level 2 y/? → Level 2; else Level 1. Then retry the edit at Level 1, or load agent-org:deliver at Level 2+.`;
+
 const samePath = (a, b) => {
   if (!a || !b) return false;
   const x = realpathLoose(path.resolve(a));
@@ -378,6 +452,31 @@ export function decide(payload, state = null, env = process.env) {
       asks.push({ rule, reason: `agent-org guard: this command matches the ask list (${rule}). Confirm before it runs.` });
     }
   }
+
+  // v0.2.2 (D34): the level check (main thread only). Recorded for this prompt_id; the level never goes down.
+  let levelAllow = false;
+  safe(() => {
+    if (tool !== 'Bash' || agentType) return;
+    const call = levelCheckCall(input.command);
+    if (!call) {
+      if (chainedLevelCheck(input.command)) {
+        denies.push({ rule: 'level-check-shape', reason: CHAINED_REASON });
+        effects.push({ kind: 'audit', repo: cwdRepo(), rec: { event: 'guard-deny', flags: ['level-check-shape'], prompt: promptIdOf(payload) || undefined } });
+      }
+      return;
+    }
+    levelAllow = true;
+    const pid = promptIdOf(payload);
+    if (!pid || !session) return; // no key or no state: the command still runs; the gate fails open
+    const prev = session.levels && session.levels[pid];
+    const level = levelFromAnswers(call.answers);
+    if (!level) return;
+    if (prev && typeof prev.level === 'number' && prev.level >= level) return; // D4: no change, no event
+    const next = raise(prev && prev.level, level);
+    const repo = cwdRepo();
+    effects.push({ kind: 'level', promptId: pid, rec: { level: next, source: call.source, repo: repo.key, answers: call.answers } });
+    effects.push({ kind: 'audit', repo, rec: { event: 'level', level: next, source: call.source, prompt: pid, ...answerFlags(call.answers) } });
+  });
 
   // v0.1: QA may only edit test paths.
   if (EDIT_TOOLS.has(tool) && agentType === QA_AGENT && !scratch && !isTestPath(editTarget(input), cwd)) {
@@ -480,6 +579,45 @@ export function decide(payload, state = null, env = process.env) {
     effects.push({ kind: 'audit', repo: cwdRepo(), rec: { event: 'guard-ask', agent_type: type || null, flags: ['team-start'] } });
   });
 
+  // v0.2.2 (D34): the level gate for one main-thread edit inside the cwd's repo.
+  const levelGate = (pid, abs, rid) => {
+    const repo = rid.key;
+    const chk = session.levels && session.levels[pid];
+    if (!chk || typeof chk.level !== 'number') {
+      denies.push({ rule: 'level-check-missing', reason: LEVEL_MISSING_REASON() });
+      effects.push({ kind: 'audit', repo: rid, rec: { event: 'guard-deny', flags: ['level-check-missing'], prompt: pid } });
+      return;
+    }
+    if (chk.level >= 2) {
+      const why = chk.answers && typeof chk.answers === 'object' ? triggered(chk.answers) : [];
+      denies.push({ rule: 'level-gate', reason: `agent-org guard: this request is Level ${chk.level}${why.length ? ` (level check: ${why.join(', ')})` : ''}. Load the agent-org:deliver skill; nothing is implemented without an approved intent.` });
+      effects.push({ kind: 'audit', repo: rid, rec: { event: 'guard-deny', flags: ['level-gate', `level-${chk.level}`], prompt: pid } });
+      return;
+    }
+    const byRepo = session.reqFiles && session.reqFiles[pid] && typeof session.reqFiles[pid] === 'object' ? session.reqFiles[pid] : {};
+    const files = Array.isArray(byRepo[repo]) ? byRepo[repo] : [];
+    if (files.some((f) => samePath(f, abs))) return; // already edited in this request
+    const rel = isUnder(abs, rid.top) ? path.relative(rid.top, abs) : abs;
+    const kinds = riskyKinds(rel);
+    let floor = null;
+    let reason = null;
+    if (kinds.length) {
+      const keys = [...new Set(kinds.map((k) => RISKY_KEY[k]))];
+      floor = kinds;
+      reason = `agent-org guard: ${kinds.map((k) => RISKY_LABELS[k]).join(' and ')} path, which the level check answered no (${keys.join(', ')}). That's a Level 2 trigger, so this request is now Level 2: load the agent-org:deliver skill; nothing is implemented without an approved intent.`;
+    } else if (files.length + 1 > 2) {
+      floor = ['files'];
+      reason = `agent-org guard: this would be file ${files.length + 1} of this request, and more than 2 files is Level 2 (D5). This request is now Level 2: load the agent-org:deliver skill; nothing is implemented without an approved intent.`;
+    }
+    if (floor) {
+      denies.push({ rule: `level-floor-${floor[0] === 'files' ? 'files' : 'path'}`, reason });
+      effects.push({ kind: 'level', promptId: pid, rec: { level: 2, source: 'floor', repo, answers: chk.answers || null } });
+      effects.push({ kind: 'audit', repo: rid, rec: { event: 'level', level: 2, source: 'floor', prompt: pid, floor } });
+      return;
+    }
+    effects.push({ kind: 'reqfile', promptId: pid, repo, file: abs });
+  };
+
   // v0.2: scope growth (main thread only).
   safe(() => {
     if (!EDIT_TOOLS.has(tool) || agentType || scratch || !session) return;
@@ -490,6 +628,16 @@ export function decide(payload, state = null, env = process.env) {
     const rid = repoIdOfFile(abs, cwd);
     const repo = rid.key;
     if (approvalFor(session, repo)) return;
+    // v0.2.2 (D34): inside the cwd's repo, with a prompt_id, the level gate replaces the D28 counter and risky ask.
+    const pid = promptIdOf(payload);
+    let cwdId = null;
+    try { cwdId = cwd ? repoId(cwd, cwd) : null; } catch { cwdId = null; }
+    const inCwdRepo = cwdId && rid.top && samePath(rid.top, cwdId.top)
+      && (isUnder(abs, cwdId.top) || isUnder(realpathLoose(abs), realpathLoose(cwdId.top)));
+    if (pid && inCwdRepo) {
+      levelGate(pid, abs, rid);
+      return;
+    }
     const seen = Array.isArray(session.scope[repo]) ? session.scope[repo] : [];
     if (seen.some((f) => samePath(f, abs))) return; // already edited this session
     const root = rid.top;
@@ -513,6 +661,9 @@ export function decide(payload, state = null, env = process.env) {
   if (asks.length) {
     return { decision: 'ask', rule: asks.map((a) => a.rule).join('; '), reason: asks.map((a) => a.reason).join(' '), effects };
   }
+  if (levelAllow) return { decision: 'allow', rule: 'level-check', reason: 'agent-org guard: level check', effects };
+  // v0.2.2: no decision, but state to record (the request's file list).
+  if (effects.length) return { decision: null, rule: null, reason: null, effects };
   return null;
 }
 
@@ -531,6 +682,24 @@ function applyEffects(payload, effects) {
     try {
       if (e.kind === 'ledger') appendLedger(payload.session_id, e.rec);
       else if (e.kind === 'audit') auditAppend(e.repo, { session: payload.session_id, tool_use_id: payload.tool_use_id, ...e.rec });
+      else if (e.kind === 'level') {
+        // D4: re-read under the lock and keep the higher level.
+        updateState(payload.session_id, (s) => {
+          const prev = s.levels[e.promptId];
+          if (prev && typeof prev.level === 'number' && prev.level >= e.rec.level) return s;
+          s.levels[e.promptId] = { ...e.rec, level: raise(prev && prev.level, e.rec.level) };
+          return s;
+        });
+      } else if (e.kind === 'reqfile') {
+        updateState(payload.session_id, (s) => {
+          const byRepo = s.reqFiles[e.promptId] && typeof s.reqFiles[e.promptId] === 'object' ? s.reqFiles[e.promptId] : {};
+          const list = Array.isArray(byRepo[e.repo]) ? byRepo[e.repo] : [];
+          if (!list.includes(e.file)) list.push(e.file);
+          byRepo[e.repo] = list;
+          s.reqFiles[e.promptId] = byRepo;
+          return s;
+        });
+      }
     } catch { /* fail open */ }
   }
 }
@@ -560,7 +729,7 @@ function debugLog(payload, result) {
       ts: new Date().toISOString(),
       hook: 'guard',
       tool: payload && typeof payload.tool_name === 'string' ? payload.tool_name : null,
-      decision: result ? result.decision : 'none',
+      decision: result && result.decision ? result.decision : 'none',
       rule: result ? result.rule : null,
     };
     if (payload && typeof payload.agent_type === 'string') line.agent_type = payload.agent_type;
@@ -579,6 +748,7 @@ async function main() {
   debugLog(payload, result);
   if (!result) return;
   applyEffects(payload, result.effects);
+  if (!result.decision) return;
   const out = JSON.stringify({
     hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: result.decision, permissionDecisionReason: result.reason },
   });

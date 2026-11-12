@@ -16,6 +16,9 @@
 // CLI: node record.mjs --intent-path <slug> [--session <id>] [--supersedes <old intent>]  prints a new, unique
 //      intent path for this repo and session, plus the header lines that record the repo key, top level, owning
 //      session and, with --supersedes, the intent it replaces (V21-10, D32).
+// CLI: node record.mjs --level-check "<answers>" [--source deliver|pm]  (v0.2.2, D34) prints the level the answers map
+//      to. It writes nothing: the guard records the check from this call's PreToolUse payload, keyed by prompt_id.
+//      With no answers it prints the questions and the template.
 // Dependency-free and fail-open. Metadata only: never content, commands or report text.
 
 import crypto from 'node:crypto';
@@ -28,7 +31,8 @@ import {
 } from './lib/state.mjs';
 import { isKeyDir, keyDir, repoId, repoIdOfFile } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
-import { inScratchpad, riskyKinds } from './guard.mjs';
+import { inScratchpad, levelCheckCommand, riskyKinds } from './guard.mjs';
+import { levelFromAnswers, parseAnswers, questionList, triggered } from './lib/level.mjs';
 
 export { intentMeta };
 
@@ -331,6 +335,25 @@ function cliIntentPath(argv) {
   process.stdout.write(`path: ${r.file}\nheader lines (put them right under the **Status:** line):\n${r.lines.join('\n')}\n`);
 }
 
+// ---------------------------------------------------------------------------------------------
+// --level-check (v0.2.2, D34)
+
+// Returns the text the CLI prints for `answersText` (undefined → the questions).
+export function levelCheckText(answersText) {
+  const how = `Run: ${levelCheckCommand()} with each ? set to y, n or ? (unsure counts as yes). ${questionList()}`;
+  if (answersText === undefined || answersText === null || String(answersText).startsWith('--')) return `agent-org level check: questions.\n${how}\n`;
+  const answers = parseAnswers(String(answersText));
+  if (!answers) return `agent-org level check: malformed answers; give every key exactly once as key=y|n|?.\n${how}\n`;
+  const level = levelFromAnswers(answers);
+  if (level === 1) return 'agent-org level check: Level 1. Go ahead (at most 2 files in this repo for this request); after editing, run the repo\'s test command if it has one and report the result.\n';
+  return `agent-org level check: Level ${level} (${triggered(answers).join(', ')}). Load the agent-org:deliver skill now; edits in this repo are denied until an intent is approved. A later check can't lower this request's level.\n`;
+}
+
+function cliLevelCheck(argv) {
+  const i = argv.indexOf('--level-check');
+  process.stdout.write(levelCheckText(argv[i + 1]));
+}
+
 function readStdin(timeoutMs = 3000) {
   return new Promise((resolve) => {
     let data = '';
@@ -351,6 +374,7 @@ function readStdin(timeoutMs = 3000) {
 async function main() {
   if (process.argv.includes('--ledger')) { cliLedger(process.argv); return; }
   if (process.argv.includes('--intent-path')) { cliIntentPath(process.argv); return; }
+  if (process.argv.includes('--level-check')) { cliLevelCheck(process.argv); return; }
   const raw = await readStdin();
   let payload;
   try { payload = JSON.parse(raw); } catch { return; }

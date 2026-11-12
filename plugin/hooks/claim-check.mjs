@@ -74,7 +74,9 @@ const CLAIMS = [
   { kind: 'any', re: /\bno\s+errors\b/i },
   { kind: 'lint', re: /\blints?\s+(?:is\s+|are\s+)?clean\b/i },
 ];
-const NEGATED = /\b(?:not|never|nothing|none\s+of|not\s+yet|didn't|didn’t|haven't|haven’t|hasn't|wasn't|weren't|cannot|can't|unverified|retract\w*|would|should|if|unless)\b|n't\b/i;
+// v0.2.2 (Phase 10 x1c): "I ran no level check", "ran none of them" negate. Only after a run verb: a bare "no"
+// would also skip the "no errors" claim kind.
+const NEGATED = /\b(?:not|never|nothing|none\s+of|not\s+yet|(?:ran|run|executed|performed)\s+(?:no|none)|didn't|didn’t|haven't|haven’t|hasn't|wasn't|weren't|cannot|can't|unverified|retract\w*|would|should|if|unless)\b|n't\b/i;
 // v0.2c (F2): future-tense or plan sentences describe what will happen, not what did.
 const FUTURE = /\b(?:I'll|I’ll|I\s+will|will|going\s+to|once|after|before|next|then\s+I)\b/i;
 const skipSentence = (s) => NEGATED.test(s) || FUTURE.test(s);

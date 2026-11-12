@@ -21,16 +21,18 @@ On escalation, the main thread calls `agent-org:principal-project-manager`. The 
 
 ### D4. Hard triggers set the minimum level — Decided
 A trigger sets the floor. The PM can raise a level but never lower it below a trigger.
+**v0.2.2 (D34):** the floor is enforced for the main thread. A request's level never goes down: a later level check, the PM or the guard can only raise it. "Unsure" counts as yes.
 
 ### D5. Levels are defined by concrete triggers, not adjectives — Decided
 | Level | Definition | Handling |
 |---|---|---|
 | 0 | Question, explanation, read-only lookup, docs typo | Main thread. No agents. |
-| 1 | Localized change, no more than ~2 files, no trigger hit | Main thread gives a one-line "here's what I'll do", then does it with focused tests. No intent file. |
-| 2 | Any of: more than ~2 files or more than one module; public API or contract change; schema or migration; new or upgraded dependency; auth or authz; secrets or credentials; CI/CD or infra/IaC; cross-service integration; user-visible behavior change | PM → intent file → **your approval** → only the specialists whose triggers fired |
-| 3 | Any of: auth/authz redesign; sensitive-data handling; production data migration; multi-service architecture change; production release or deploy; significant AI/ML platform work | As Level 2, plus independent QA and InfoSec, durable evidence, and human approval before release |
+| 1 | Localized change, no more than 2 files, no trigger hit. Copy-only text changes, and bug fixes that restore intended behavior, are Level 1. | Main thread runs the level check (D34), then does it with focused tests. No intent file. |
+| 2 | Any of: more than 2 files or more than one module; public API or contract change; schema or migration; new or upgraded dependency; auth or authz; secrets or credentials; CI/CD or infra/IaC; cross-service integration; user-visible behavior change, meaning a change to what the user can do or what the system returns, beyond restoring intended behavior | PM → intent file → **your approval** → only the specialists whose triggers fired |
+| 3 | Any of: auth/authz redesign; sensitive-data handling; production data migration, meaning moving, transforming, deleting or backfilling existing production data (a new nullable column with no backfill is Level 2 through the schema trigger); multi-service architecture change; production release or deploy; significant AI/ML platform work | As Level 2, plus independent QA and InfoSec, durable evidence, and human approval before release |
 
 Level 2 catches most real work, so the line between 1 and 2 is drawn by triggers to avoid both needless approval stops and risky changes slipping through.
+**v0.2.2 (Phase 10):** "~2 files" became "2 files". "User-visible behavior change" is defined as a change to what the user can do or what the system returns; copy-only text changes are Level 1. Why: report 10 found the line ambiguous in both directions. The 3-file refactor (B3) went Level 1 in 5/5 runs. The 2-file copy change (B4) also went Level 1 in 5/5, which you ruled correct, so the definition now says so. Phase 10 Part 3 split two controls on wording: a bug fix (C1a) answered `behavior=y` in 2 of 4 runs, and a nullable-column migration (C2a) answered `proddata=?` in 2 of 4. So bug fixes that restore intended behavior aren't behavior changes, and "production data migration" means moving, transforming, deleting or backfilling existing production data.
 
 ### D6. Level 2+ work requires an approved intent file — Decided
 - The PM writes the content. The main thread saves it to `~/.agent-org/intents/<repo>/<YYYY-MM-DD>-<slug>.md` and creates the directory if it's missing.
@@ -73,6 +75,7 @@ Plugin hooks and user hooks aren't de-duplicated, so Phase 4 must not copy the p
 ### D12. The command guard — Decided, Verified
 Ask rules match command text only (`git -C . push` slips past `Bash(git push *)`). The plugin's `PreToolUse` guard (`hooks/guard.mjs`) normalizes and splits shell commands (wrappers, absolute paths, `git -C`, `sh -c`, `$(…)`, global flags) and returns `ask` on the user ask list, naming every match. It also **denies** `agent-org:quality-assurance-architect` `Edit`/`Write` outside test paths, using `agent_type`. It never returns `allow` and fails open, so the ask rules stay the primary layer. Verified live: `git -C . push` stopped (Phase 4 G6), QA's `src/` edit denied (G5′).
 Out of reach, by design: git aliases, scripts or Makefiles that run git, interpreter one-liners (`python -c "os.system(...)"`), and variable-built commands. QA's Bash isn't path-scoped.
+**v0.2.2 (D34):** the guard returns one `allow`: for the main thread's exact level-check call (`node <this plugin>/hooks/record.mjs --level-check "<answers>"`, optional `--source deliver|pm`). The command name in the raw text must be node itself, with no env prefix or wrapper. There is one segment, no redirect, substitution or operator, the script must be this plugin's own `record.mjs`, and the answers must be well-formed. Why: the check runs before every Level 1 edit, so a permission prompt each time would train you to click yes. The command only prints the mapping and writes nothing (the guard records the check).
 **v0.2.1:** the specialist ask-list deny and the QA test-path deny are audited as `guard-deny` (V21-2; Phase 6c had no audit line for three push denies). A new deny protects intents another session owns (D32). Engineer bindings now list commit, push, merge, tag and deploy commands as guard-enforced, not instruction-only (V21-8); routes the guard can't see stay instruction-only.
 
 ### D13. No rules or CLAUDE.md in the plugin — Verified
@@ -117,6 +120,8 @@ In this build, `Agent` calls run in the background by default and report back as
 ### D20. Level 1 is an instruction, not a description — Decided
 Phase 3 (F3, 2/2 runs) showed "one-line plan, then do it with focused tests" gets skipped. The rule card now ties the plan to the tool call: the first Edit or Write must come after a line starting "Plan:"; then run the repo's tests. Phase 3b: tests ran 2/2, plan-before-edit 1/2. Phase 4, after the tool-tied wording: 2/2. This stays instruction-only and best-effort; a hook isn't worth it for Level 1.
 
+**v0.2.2 (D34):** superseded for the Level 1 plan line. The unenforced "Plan:" line is replaced by the enforced level check. The rule card no longer asks for "Plan:", and the "run the tests after editing" instruction stays.
+
 ### D21. Install from a pinned remote; develop with `--plugin-dir` — Decided, Verified
 Installed from the local folder, the plugin is read live from the working tree, so any edit or branch switch changes the running plugin (Phase 3 §2). That breaks the pinned-and-versioned promise of D15. Target: tag releases on `production` and install from GitHub, pinned to the tag; test development changes with `claude --plugin-dir ./plugin`. Verified in Phase 4: `claude plugin marketplace add jmthompson-dev/agent-org@vX.Y.Z` pins to a tag, and the install is cached by `plugin.json` `version`, so **every release must bump `version`** or updates silently do nothing. `claude --plugin-dir ./plugin` silently shadows the installed copy for that session. Re-pin by removing and re-adding the marketplace, then reinstalling: removing the marketplace also uninstalls the plugin, so `claude plugin update` fails with "not installed" (v0.2.1 release). `~/.agent-org` is untouched. Pin to tags, not the `production` branch: tags don't move.
 
@@ -136,6 +141,7 @@ A1 (`Stop`, main thread) and A2 (`SubagentStop`, agent-org specialists) read `la
 Verified in Phase 5: P5 A1–A8 (P1a, P3), `reports/05-inspect-v0.2-2026-11-08.md`.
 **Phase 6 changes:** the citation check covers only `path:line` citations, skips negated and future-tense sentences, and counts paths seen in tool output (17 of 21 blocks were false before). Claims in a turn with no tool calls may be backed by the previous turn. The block form is `hookSpecificOutput.additionalContext` ("Stop hook feedback", not "Stop hook error"). The PM is exempt from the report contract on `SubagentStop` and `SubagentHandback`.
 **Phase 6b changes:** when `SubagentStop` has no `last_assistant_message` (the specialist reported through `SubagentHandback`), the report text comes from that hand-back message. Hedges and estimates aren't claims. A later `Outcome:` line is used when the first line has none. `VERIFIED` requires every acceptance criterion met or waived by the user.
+**v0.2.2 changes (Phase 10 C0: 4 of 5 Level 0 runs blocked falsely):** `path:line` pairs shown in Grep or Read output count as opened. A Grep over one file (`path` = that file) prints numbered lines with no path, so that file counts when its output shows numbered lines. A `path:line` pair inside Read output counts too, but a bare path there doesn't. Failed Greps and `files_with_matches` output don't count. Test: the C0-1 transcript shape (`tests/v022.test.mjs`). Also, "I ran no …" (and "ran none", "executed no") negates, but only after a run verb, so the "no errors" claim kind still counts (Phase 10 x1c: "I ran no level check" was blocked falsely).
 **v0.2.1 changes (V21-1, Phase 6c: 6 of 7 main-thread blocks false):** finished teammates' `<teammate-message>` reports (idle-notification results; plain messages once the teammate finished) join the relay pool; "none of" and "not yet" negate; status sentences ("Status:", "marked VERIFIED"), "verified" as an adjective and purpose clauses ("Goal:", "so that", "to make … pass") aren't claims; a turn whose only calls edit intent files may restate the previous turn's evidence. Two additions beyond the 6c fix list, both needed to clear its cases on replay: a list item whose bold label is negated, hedged or a goal qualifies its whole line, and relay matching ignores a few filler words and accepts any non-negated specialist sentence. Every skip rule judges each `;` clause on its own, so "Not run yet: integration; unit tests pass" still blocks. Tests: `node tests/run.mjs`. Replay of the seven 6c blocks: 0 of 6 false blocks remain, the true one still blocks (Phase 9).
 
 ### D26. Parallel specialists share one tree; collisions are prevented where possible, detected always, and re-planned — Decided; mechanism Verified (P5 P2)
@@ -150,6 +156,7 @@ Verified in Phase 5: P5 C1–C5, `reports/05-inspect-v0.2-2026-11-08.md`.
 ### D28. The scope-growth guard is session-scoped and always asks — Decided; fields Verified (P5 D1–D5)
 Main-thread edits to more than ~3 files, or a first risky-path edit, with no approval recorded for this `session_id`, trigger `ask`. Approval is recorded by a `PostToolUse` hook; it survives resume and compaction, not `/clear` or a fork. Bash edits are a documented gap.
 Verified in Phase 5: P5 D1–D5, `reports/05-inspect-v0.2-2026-11-08.md`.
+**v0.2.2:** amended by D34 for the main thread in the working directory's repo, for payloads with a `prompt_id`: the level gate denies instead of asking, counts files per request instead of per session, and denies at the 3rd file instead of asking at the 4th. Other repos and payloads without a `prompt_id` keep this rule unchanged.
 **v0.2.1 (V21-9, V21-10):** approvals, the scope counter and risky kinds are keyed by the repo key (D31), and an approval comes only from an intent whose recorded key matches its folder (D32). Before this, an approval in `…/a/app` silenced the guard in `…/b/app`, within one session or via another session's intent (Phase 9, tested on the v0.2.0 code).
 
 ### D29. At Level 3, the independent QA reviewer reproduces the key claims — Decided
@@ -171,4 +178,46 @@ Intent files are named `<date>-<slug>-<session prefix>.md` under the repo key's 
 
 ### D33. Agent descriptions are built from the persona's Use for / Not for lines — Decided (landed before Phase 9: `4ebfb6d`, `903e4ef`, `e2d959d`)
 Each description is `Use for <use> <agent-org clause> Not for <not>`, with `<use>` and `<not>` taken from the persona's `**Use for:**` and `**Not for:**` lines at the pin (markdown stripped, not reworded). Only the agent-org clause is written in the plugin. Every Not for names the owner of the excluded work, so the PM can route on descriptions alone. `sync-personas.mjs --check` reports `DESC` when a description stops matching its persona; `--bump` rewrites the persona parts. Pin: `agent-personas@12a0c9c`. Why: one source for the routing text, kept in the persona repo and checked by `sync-personas`.
+
+## v0.2.2
+
+### D34. The level is chosen deterministically: a level check mapped by code, enforced at the first edit — Decided; mapping unit-tested (`tests/v022.test.mjs`); live behavior is Phase 10 Part 3
+**What the main thread does.** Before the first file edit of each request, it answers the D5 Level 2 and Level 3 triggers (15 keys) with `y`, `n` or `?` in one Bash call: `node <plugin>/hooks/record.mjs --level-check "files=n api=n …"`.
+
+**The mapping.** A pure function, `lib/level.mjs` `levelFromAnswers`. Unsure counts as yes; any Level 3 answer gives 3; else any Level 2 answer gives 2; else 1. Malformed or missing answers map to null.
+
+**What the guard does with the call (`PreToolUse`):**
+- records the check for the payload's `prompt_id`; the level never goes down (D4);
+- audits a `level` event: the level, the source (`checklist`, `deliver`, `pm` or `floor`), the prompt id, and the answers as booleans, with `unsure` listing the unsure keys. No text;
+- allows the call (D12 note).
+
+A re-check that doesn't raise the level writes no event, so a job has one level event plus one per raise.
+
+**The gate (amends D28 for the main thread).** It applies to a main-thread `Edit`/`Write`/`NotebookEdit` inside the working directory's repo, with a `prompt_id`, when the session has no approval for the repo key. The edit is **denied**, with no `ask`, in any of these cases:
+- no check for this request: the reason gives the exact command and questions;
+- the check maps to Level 2+: "load agent-org:deliver";
+- the edit would be the request's third distinct file;
+- the edit touches a D2 risky path (migration, CI, infra, auth).
+
+The last two raise the request to Level 2 (`level` event, source `floor`). Files are counted per request (`prompt_id`), not per session.
+
+**Exemptions and failure:**
+- **Exempt:** paths outside the working directory's repo, including `~/.agent-org/` (intents) and the scratchpad. Other repos keep the D28 session ask.
+- **Fail open:** with no `prompt_id`, unreadable state or any error, the old D28 behavior or no decision applies.
+
+**Why:**
+- **Nothing scored the level.** Report 10 found every level rule instruction-only below Level 2. The keyword nudge fired on 2 of 10 prompts, and B3 (3 files) went Level 1 5/5 with no "Plan:" line, under a scope guard that asks only at the 4th file.
+- **The answers can't go in the message.** A `Level check:` block in the same message as the first edit isn't in the transcript when `PreToolUse` fires (probe, 0/3; the docs say the transcript may lag). A tool call's input is always visible.
+- **Same answers, same level:** the choice is reproducible and explainable from the audit.
+
+**Limits:**
+- A model that answers `n` to everything is caught only by the deterministic floors (3rd file, risky path). An `n` on `behavior` or `api` in two ordinary files is taken on trust, but recorded.
+- Bash-made edits stay a gap (as in D28).
+- `prompt_id` in hook payloads was observed on `PreToolUse` and `UserPromptSubmit` (Phase 10 probe). Whether a Stop-hook continuation keeps the same `prompt_id` is unverified; if it doesn't, the model re-runs the check (one extra call).
+
+**Cost:** one tool call per Level 1 job, or two more when the model forgets the check (deny, check, retry). Level 0 needs no check, because it makes no edits.
+**Phase 10 Part 3 fixes:**
+- **Chained checks:** a command that runs `record.mjs --level-check` but isn't the allowed shape on its own (chained, piped, redirected, behind an env prefix or wrapper) is denied with "run the level check as its own call" (`level-check-shape`, audited). 11 of 33 jobs had chained the check with git calls, so nothing was recorded.
+- **File counts:** `files` takes a file count (more than 2 → y), because 8 of 33 first checks answered `files=2`.
+- **Wording:** the `behavior` and `proddata` questions follow the D5 wording above.
 

@@ -1,6 +1,6 @@
 {
   "name": "agent-org",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Principal Project Manager orchestration with 14 pinned specialist personas, level-based escalation and an approval-gated intent workflow",
   "author": {
     "name": "jmthompson-dev"

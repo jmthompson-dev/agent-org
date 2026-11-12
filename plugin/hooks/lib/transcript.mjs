@@ -151,15 +151,21 @@ export function filesOpenedInSession(entries, cwd) {
 }
 
 // v0.2c (F2): file paths seen in successful tool output count as seen for the citation check: Grep and
+// (v0.2.2) a single-file Grep's own path when its output shows numbered lines, `path:line` pairs in Read output, and
 // Glob results and Bash/PowerShell output (`path:line:` or a path at a line start, plus path-like tokens with
 // a file extension anywhere in the output, e.g. a file name printed by audit-verify.mjs). Paths with a
 // directory part are resolved against the call's cwd; bare file names are returned as is.
 const OUT_TOKEN = /(?<![\w@/.~-])((?:~|\.{1,2})?[\\/]?(?:[\w@.+-]+[\\/])*[\w@+-][\w@.+-]*\.[A-Za-z][A-Za-z0-9]{0,9})(?=$|[\s:,;)\]'"`>])/gm;
 const LINE_START = /^\s*((?:~|\.{1,2})?[\\/]?(?:[\w@.+-]+[\\/])+[\w@.+-]+)(?::\d+[:-]|\s*$)/gm;
+// v0.2.2 (Phase 10 C0): `path:line` pairs. A Read result shows another file's lines only through such pairs.
+const PAIR_TOKEN = /(?<![\w@/.~-])((?:~|\.{1,2})?[\\/]?(?:[\w@.+-]+[\\/])*[\w@+-][\w@.+-]*\.[A-Za-z][A-Za-z0-9]{0,9}):\d+/gm;
+// A Grep over one file prints its matches as `<line>:` / `<line>-` with no path (Phase 10 C0: 4 of 5 Level 0 runs were
+// blocked for citing lines they had seen this way).
+const NUMBERED_LINE = /^\s*\d+[:-]/m;
 export function filesSeenInOutput(entries, cwd) {
   const out = new Set();
   for (const c of toolCalls(entries)) {
-    if (!succeeded(c) || !['Grep', 'Glob', 'Bash', 'PowerShell'].includes(c.name) || !c.resultText) continue;
+    if (!succeeded(c) || !['Grep', 'Glob', 'Bash', 'PowerShell', 'Read'].includes(c.name) || !c.resultText) continue;
     const base = c.cwd || cwd || process.cwd();
     const text = c.resultText.length > 2_000_000 ? c.resultText.slice(0, 2_000_000) : c.resultText;
     const add = (p) => {
@@ -167,6 +173,13 @@ export function filesSeenInOutput(entries, cwd) {
       if (/[\\/]/.test(p)) out.add(path.resolve(base, p.startsWith('~') ? p.replace(/^~/, process.env.HOME || '~') : p));
       else out.add(p);
     };
+    if (c.name === 'Read') {
+      for (const m of text.matchAll(PAIR_TOKEN)) add(m[1]);
+      continue;
+    }
+    if (c.name === 'Grep' && typeof c.input.path === 'string' && c.input.path && NUMBERED_LINE.test(text)) {
+      out.add(path.resolve(base, c.input.path.startsWith('~') ? c.input.path.replace(/^~/, process.env.HOME || '~') : c.input.path));
+    }
     for (const m of text.matchAll(OUT_TOKEN)) add(m[1]);
     for (const m of text.matchAll(LINE_START)) add(m[1]);
   }

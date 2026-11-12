@@ -20,7 +20,7 @@ export const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const GENESIS = '';
 
 // No separate `conflict` event (v0.2c, F5): a `result` line with outcome BLOCKED is the conflict record.
-export const EVENTS = new Set(['dispatch', 'result', 'collision', 'guard-deny', 'guard-ask', 'claim-flag',
+export const EVENTS = new Set(['dispatch', 'result', 'collision', 'guard-deny', 'guard-ask', 'claim-flag', 'level',
   'team-task-created', 'team-task-completed', 'teammate-idle', 'message']);
 
 // Keep repo names usable as file names on every OS.

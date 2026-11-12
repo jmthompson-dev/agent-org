@@ -2,7 +2,9 @@
 //   ~/.agent-org/state/<session_id>/state.json   {approvals: [{repo, intent, mode, approvedAt}],
 //                                                 scope: {<repo>: [files]},
 //                                                 dispatch: {<agentId>: {promptId, toolUseId, agentType, teammate}},
-//                                                 finished: {<agentId>: ts}, riskySeen: {<repo>: [kinds]}}
+//                                                 finished: {<agentId>: ts}, riskySeen: {<repo>: [kinds]},
+//                                                 levels: {<prompt_id>: {level, source, repo, answers}}  (v0.2.2, D34),
+//                                                 reqFiles: {<prompt_id>: {<repo>: [files]}}}             (v0.2.2, D34)
 //   ~/.agent-org/state/<session_id>/ledger.jsonl  {ts, agent_id, agent_type, file[, collision, tool_use_id]}
 // Metadata only, never content. Writes go through the lock; JSON updates are temp file plus rename.
 // The session id scopes everything: approvals survive resume and compaction, not /clear or a fork.
@@ -26,7 +28,7 @@ export function sessionDir(sessionId) {
   return id ? path.join(stateRoot(), id) : null;
 }
 
-export const emptyState = () => ({ approvals: [], scope: {}, dispatch: {}, finished: {}, riskySeen: {} });
+export const emptyState = () => ({ approvals: [], scope: {}, dispatch: {}, finished: {}, riskySeen: {}, levels: {}, reqFiles: {} });
 
 function normalizeState(s) {
   if (!s || typeof s !== 'object' || Array.isArray(s)) throw new Error('bad state');
@@ -36,6 +38,8 @@ function normalizeState(s) {
     dispatch: s.dispatch && typeof s.dispatch === 'object' && !Array.isArray(s.dispatch) ? s.dispatch : {},
     finished: s.finished && typeof s.finished === 'object' && !Array.isArray(s.finished) ? s.finished : {},
     riskySeen: s.riskySeen && typeof s.riskySeen === 'object' && !Array.isArray(s.riskySeen) ? s.riskySeen : {},
+    levels: s.levels && typeof s.levels === 'object' && !Array.isArray(s.levels) ? s.levels : {},
+    reqFiles: s.reqFiles && typeof s.reqFiles === 'object' && !Array.isArray(s.reqFiles) ? s.reqFiles : {},
   };
 }
 
