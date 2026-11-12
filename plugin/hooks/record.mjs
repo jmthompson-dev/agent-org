@@ -9,19 +9,28 @@
 //   (v0.2e) edits under the payload's scratchpad_dir are neither ledgered nor counted (V-4)
 //   SubagentHandback                         → A2 report-contract check (PM exempt, F9); audit `claim-flag` if it fails
 // Agent identity goes through effectiveType() (v0.2c, F1): teammates carry agent_type = their name.
+//   (v0.2.1, V21-9/V21-10) approvals, scope and audit lines are keyed by the repo key (lib/repo.mjs). An intent's
+//   approval applies to the key in its `**Repo key:**` line, which must match its folder; a v0.2.0 intent (folder =
+//   D6 basename) is read but never approves.
 // CLI: node record.mjs --ledger [--session <id>]  prints the per-agent file summary and collision flags.
+// CLI: node record.mjs --intent-path <slug> [--session <id>] [--supersedes <old intent>]  prints a new, unique
+//      intent path for this repo and session, plus the header lines that record the repo key, top level, owning
+//      session and, with --supersedes, the intent it replaces (V21-10, D32).
 // Dependency-free and fail-open. Metadata only: never content, commands or report text.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   appendLedger, approvalFor, effectiveType, intentsRoot, isUnder, latestSessionId, orgDir, readLedger, readState,
-  realpathLoose, resolvePath, safeId, updateState,
+  intentMeta, realpathLoose, resolvePath, safeId, updateState,
 } from './lib/state.mjs';
-import { repoName, repoOfFile, repoRoot } from './lib/repo.mjs';
+import { isKeyDir, keyDir, repoId, repoIdOfFile } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
 import { inScratchpad, riskyKinds } from './guard.mjs';
+
+export { intentMeta };
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
 const PM = 'agent-org:principal-project-manager';
@@ -58,9 +67,12 @@ export function intentApproval(text) {
 // validation sections (B6). Returns the `## ` heading an Edit landed in when it's outside those, else null.
 const STATUS_LINE = /^\s*\*\*Status:\*\*/;
 const ALLOWED_SECTION = /^(?:approval log|evidence|validation)\b/i;
-export function intentEditSection(text, newString) {
+// v0.2.1 (Phase 9): with `oldString`, only lines the edit adds or changes count, so a status edit that carries the
+// unchanged `**Repo key:**` line below it (to make old_string unique) isn't flagged.
+export function intentEditSection(text, newString, oldString) {
   if (typeof text !== 'string' || typeof newString !== 'string') return null;
-  const lines = newString.split('\n').filter((l) => l.trim());
+  const before = new Set(typeof oldString === 'string' ? oldString.split('\n').map((l) => l.trim()) : []);
+  const lines = newString.split('\n').filter((l) => l.trim() && !before.has(l.trim()));
   if (lines.length && lines.every((l) => STATUS_LINE.test(l))) return null;
   const at = newString ? text.indexOf(newString) : -1;
   if (at < 0) return '(unknown section)';
@@ -81,11 +93,23 @@ export function intentId(abs) {
   return null;
 }
 
+// The repo key an intent's approval applies to, or null (no approval is recorded).
+//   v0.2.1 intent (its folder is a key directory): the `**Repo key:**` line must be present and its directory
+//   form must be the folder, so an intent can't be moved or retargeted into another repo's approval.
+//   v0.2.0 intent (folder = D6 basename): never approves. It stays readable and editable, but nothing in it says
+//   which repo it belongs to, so it can't be matched safely (Phase 9: same-named repos).
+export function intentRepoKey(folder, text) {
+  if (!isKeyDir(folder)) return null;
+  const { key } = intentMeta(text);
+  return key && keyDir(key) === folder ? key : null;
+}
+
 // Fields every audit record of this session shares: session id and the repo's approved intent.
+// `repo` is a repo id ({key, …}) or a key string.
 export function auditBase(payload, repo) {
   const base = { session: payload.session_id };
   try {
-    const a = approvalFor(readState(payload.session_id), repo);
+    const a = approvalFor(readState(payload.session_id), repo && typeof repo === 'object' ? repo.key : repo);
     if (a && a.intent) base.intent = a.intent;
   } catch { /* no state */ }
   return base;
@@ -119,17 +143,24 @@ export function record(payload) {
     if (org.some((d) => isUnder(abs, d))) {
       const id = intentId(abs);
       if (!id || !id.includes('/')) return;
-      const repo = id.split('/')[0];
+      const folder = id.split('/')[0];
       let text = '';
       try { text = fs.readFileSync(abs, 'utf8'); } catch { return; }
+      const key = intentRepoKey(folder, text);
+      let target = folder;
+      if (key) {
+        let here = null;
+        try { here = repoId(cwd || process.cwd(), cwd); } catch { here = null; }
+        target = here && here.key === key ? here : { key, dir: keyDir(key), name: folder };
+      }
       // F6: an approved intent's plan is the PM's; detect (don't block) other main-thread edits to it.
       try {
         const st = readState(sid);
-        const wasApproved = st.approvals.some((a) => a && a.repo === repo && a.intent === id);
+        const wasApproved = st.approvals.some((a) => a && a.intent === id);
         if (wasApproved && tool === 'Edit') {
-          const section = intentEditSection(text, input.new_string);
+          const section = intentEditSection(text, input.new_string, input.old_string);
           if (section) {
-            auditAppend(repo, {
+            auditAppend(target, {
               session: sid, intent: id, event: 'claim-flag', tool_use_id: payload.tool_use_id,
               flags: ['intent-edited-after-approval', section],
             });
@@ -137,19 +168,19 @@ export function record(payload) {
         }
       } catch { /* fail open */ }
       const ap = intentApproval(text);
-      if (!ap) return;
+      if (!ap || !key) return;
       updateState(sid, (s) => {
-        s.approvals = s.approvals.filter((a) => !(a && a.repo === repo && a.intent === id));
-        s.approvals.push({ repo, intent: id, mode: ap.mode, approvedAt: new Date().toISOString() });
+        s.approvals = s.approvals.filter((a) => !(a && a.intent === id));
+        s.approvals.push({ repo: key, intent: id, mode: ap.mode, approvedAt: new Date().toISOString() });
         return s;
       });
       return;
     }
-    const repo = repoOfFile(abs, cwd);
+    const rid = repoIdOfFile(abs, cwd);
+    const repo = rid.key;
     let kinds = [];
     try {
-      const root = repoRoot(path.dirname(abs), cwd);
-      kinds = riskyKinds(isUnder(abs, root) ? path.relative(root, abs) : abs);
+      kinds = riskyKinds(isUnder(abs, rid.top) ? path.relative(rid.top, abs) : abs);
     } catch { kinds = []; }
     updateState(sid, (s) => {
       const list = Array.isArray(s.scope[repo]) ? s.scope[repo] : [];
@@ -175,10 +206,12 @@ export function record(payload) {
         promptId: payload.prompt_id ?? null, toolUseId: payload.tool_use_id ?? null, agentType: type,
         teammate: resp.status === 'teammate_spawned',
       };
+      // v0.2.1 (V21-1): a teammate's name maps its <teammate-message> reports back to this agent.
+      if (typeof input.name === 'string' && input.name) s.dispatch[agentId].name = input.name;
       return s;
     });
     if (type && type.startsWith('agent-org:')) {
-      const repo = repoName(cwd || process.cwd(), cwd);
+      const repo = repoId(cwd || process.cwd(), cwd);
       const flags = [];
       if (typeof input.name === 'string' && input.name) flags.push('named');
       auditAppend(repo, {
@@ -195,7 +228,7 @@ export function record(payload) {
     if (!agentType || !agentType.startsWith('agent-org:') || agentType === PM) return;
     const outcome = parseOutcome(input.message);
     if (outcome) return;
-    const repo = repoName(cwd || process.cwd(), cwd);
+    const repo = repoId(cwd || process.cwd(), cwd);
     auditAppend(repo, {
       ...auditBase(payload, repo), event: 'claim-flag', agent_id: payload.agent_id, agent_type: agentType,
       tool_use_id: payload.tool_use_id, flags: ['handback-missing-outcome'],
@@ -254,6 +287,50 @@ function cliLedger(argv) {
   process.stdout.write(`agent-org ledger for session ${sid} (from ${source})\n${body}\n`);
 }
 
+// ---------------------------------------------------------------------------------------------
+// --intent-path: a new intent file for this repo and session (V21-9, V21-10)
+
+const localDate = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+// Returns {file, key, top, session, lines} or {error}. Never creates or writes anything.
+// `supersedes` (D32): an existing intent this one replaces, e.g. one another session owns after /clear. It must be
+// an existing file under ~/.agent-org/intents/; the header then gets `**Supersedes:** ~/.agent-org/intents/<id>`.
+export function intentPath(slug, sessionId, cwd = process.cwd(), supersedes = null) {
+  if (typeof slug !== 'string' || slug.length > 60 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) {
+    return { error: 'give a short kebab-case slug, e.g. --intent-path add-login-form' };
+  }
+  let old = null;
+  if (supersedes !== null && supersedes !== undefined) {
+    const abs = resolvePath(String(supersedes), cwd);
+    old = abs ? intentId(abs) : null;
+    let isFile = false;
+    try { isFile = fs.statSync(abs).isFile(); } catch { isFile = false; }
+    if (!old || !old.includes('/') || !isFile) return { error: '--supersedes must name an existing intent file under ~/.agent-org/intents/' };
+  }
+  const sid = safeId(sessionId);
+  const id = repoId(cwd, cwd);
+  // The suffix makes the name unique per session; without a session id it's random (owner then unknown).
+  const suffix = sid ? (sid.replace(/[^A-Za-z0-9]/g, '').slice(0, 8).toLowerCase() || 'session') : crypto.randomBytes(4).toString('hex');
+  const dir = path.join(intentsRoot(), id.dir);
+  const base = `${localDate()}-${slug}-${suffix}`;
+  let file = path.join(dir, `${base}.md`);
+  for (let n = 2; fs.existsSync(file) && n < 100; n++) file = path.join(dir, `${base}-${n}.md`);
+  const lines = [`**Repo key:** ${id.key}`, `**Top level:** ${id.top}`, `**Session:** ${sid || 'unknown'}`];
+  if (old) lines.push(`**Supersedes:** ~/.agent-org/intents/${old}`);
+  return { file, key: id.key, top: id.top, session: sid, lines };
+}
+
+function cliIntentPath(argv) {
+  const i = argv.indexOf('--intent-path');
+  const j = argv.indexOf('--session');
+  const sid = (j >= 0 ? argv[j + 1] : null) || process.env.CLAUDE_CODE_SESSION_ID || null;
+  const k = argv.indexOf('--supersedes');
+  let r;
+  try { r = intentPath(argv[i + 1], sid, process.cwd(), k >= 0 ? (argv[k + 1] ?? '') : null); } catch { r = { error: 'could not resolve the repo' }; }
+  if (r.error) { process.stdout.write(`agent-org intent path: ${r.error}\n`); return; }
+  process.stdout.write(`path: ${r.file}\nheader lines (put them right under the **Status:** line):\n${r.lines.join('\n')}\n`);
+}
+
 function readStdin(timeoutMs = 3000) {
   return new Promise((resolve) => {
     let data = '';
@@ -273,6 +350,7 @@ function readStdin(timeoutMs = 3000) {
 
 async function main() {
   if (process.argv.includes('--ledger')) { cliLedger(process.argv); return; }
+  if (process.argv.includes('--intent-path')) { cliIntentPath(process.argv); return; }
   const raw = await readStdin();
   let payload;
   try { payload = JSON.parse(raw); } catch { return; }

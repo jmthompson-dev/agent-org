@@ -8,7 +8,7 @@
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { repoName } from './lib/repo.mjs';
+import { repoId } from './lib/repo.mjs';
 import { effectiveType, readState } from './lib/state.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
 import { auditBase } from './record.mjs';
@@ -61,7 +61,7 @@ async function main() {
   try { state = readState(payload.session_id); } catch { state = null; }
   const rec = teamRecord(payload, state);
   if (!rec) return;
-  const repo = repoName(payload.cwd || process.cwd(), payload.cwd);
+  const repo = repoId(payload.cwd || process.cwd(), payload.cwd);
   auditAppend(repo, { ...auditBase(payload, repo), ...rec });
 }
 

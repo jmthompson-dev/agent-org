@@ -216,3 +216,27 @@ export function subagentTranscripts(transcriptPath, sessionId) {
     return [];
   }
 }
+
+// v0.2.1 (V21-1): teammate reports in the lead's transcript. They arrive as user prompts holding
+// `<teammate-message teammate_id="<name>" …>BODY</teammate-message>`. BODY is either JSON (an idle notification
+// whose `result` is the report the teammate gave when it stopped) or the plain text of a SendMessage.
+// Returns [{teammate, text, idle}]; JSON bodies with no `result` (shutdown and other protocol messages) are skipped.
+const TEAMMATE_RE = /<teammate-message\s+teammate_id="([^"]{1,128})"[^>]*>\n?([\s\S]*?)<\/teammate-message>/g;
+export function teammateMessages(entries) {
+  const out = [];
+  for (const e of entries) {
+    if (e.type !== 'user' || !e.message || typeof e.message.content !== 'string') continue;
+    if (!e.message.content.includes('<teammate-message')) continue;
+    for (const m of e.message.content.matchAll(TEAMMATE_RE)) {
+      const body = m[2].trim();
+      let json = null;
+      if (body.startsWith('{')) { try { json = JSON.parse(body); } catch { json = null; } }
+      if (json && typeof json === 'object') {
+        if (typeof json.result === 'string' && json.result.trim()) out.push({ teammate: m[1], text: json.result, idle: json.type === 'idle_notification' });
+        continue;
+      }
+      if (body) out.push({ teammate: m[1], text: body, idle: false });
+    }
+  }
+  return out;
+}

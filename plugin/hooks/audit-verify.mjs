@@ -8,6 +8,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listRepos, safeRepo, verify } from './lib/audit.mjs';
+import { keyDir } from './lib/repo.mjs';
 
 export function verifyLines(repos) {
   const lines = [];
@@ -31,7 +32,9 @@ export function verifyLines(repos) {
 function main() {
   const argv = process.argv.slice(2);
   const i = argv.indexOf('--repo');
-  const repos = i >= 0 && argv[i + 1] ? [safeRepo(argv[i + 1])] : listRepos();
+  // v0.2.1 (V21-9): --repo takes a key (`github.com/acme/app`), its directory form, or a v0.2.0 D6 name.
+  const arg = i >= 0 ? argv[i + 1] : null;
+  const repos = arg ? [arg.includes('/') ? keyDir(arg) : safeRepo(arg)] : listRepos();
   if (!repos.length) {
     process.stdout.write('agent-org audit: no audit logs found under ~/.agent-org/audit/\n');
     return 0;

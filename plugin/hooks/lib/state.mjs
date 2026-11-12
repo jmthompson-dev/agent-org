@@ -129,6 +129,14 @@ export function approvalFor(state, repo) {
   return hits.length ? hits[hits.length - 1] : null;
 }
 
+// v0.2.1 (V21-10): header fields an intent records under its status line.
+const metaRe = (label) => new RegExp(`^[ \\t]*(?:[-*][ \\t]+)?\\*\\*${label}:\\*\\*[ \\t]*\`?([^\`\\n]*?)\`?[ \\t]*$`, 'mi');
+export function intentMeta(text) {
+  if (typeof text !== 'string') return { key: null, top: null, session: null };
+  const get = (label) => { const m = metaRe(label).exec(text); return m && m[1].trim() ? m[1].trim() : null; };
+  return { key: get('Repo key'), top: get('Top level'), session: get('Session') };
+}
+
 // Resolve `~`, relative paths and symlinks (on the longest existing prefix).
 export function resolvePath(p, cwd) {
   if (typeof p !== 'string' || !p) return null;

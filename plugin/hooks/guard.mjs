@@ -16,11 +16,17 @@
 //      `git push` in an auto-mode session after an ask. The main thread keeps the ask.
 //   8. (v0.2f) Team-start ask: with CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1, a named non-agent-org Agent call
 //      without `isolation` would start an agent team, so `ask` (D30). Audited as guard-ask ["team-start"].
+//   9. (v0.2.1, V21-10) Intent ownership: `deny` an Edit/Write/NotebookEdit of an existing intent whose
+//      `**Session:**` line names another session, and a Write over an existing intent with no recorded owner.
+//      Either way the intent is saved as a new file instead; nothing is overwritten blind.
 //   (v0.2e, V-4) Files under the payload's scratchpad_dir are exempt from rules 2, 3 and 6.
+//   (v0.2.1, V21-2) The specialist ask-list deny (7) and the QA path deny (2) are audited as `guard-deny`.
+//   (v0.2.1, V21-9) Approvals, scope and audit lines are keyed by the repo key (lib/repo.mjs), not the D6 name.
 // Agent identity goes through effectiveType() (v0.2c, F1): teammate hooks carry agent_type = the teammate's
 // name, and the dispatch record maps their agent_id back to the agent-org type.
 // Decisions combine: any deny wins, else any ask (reasons joined). It never returns `allow`.
-// Rules 3, 4, 6 and 7 (and teammate identity) read session state and fail open when it is missing or unreadable.
+// Rules 3, 4 and 6 (and teammate identity) read session state and fail open when it is missing or unreadable.
+// Rule 9 reads only the existing intent file and fails open when it can't.
 // Dependency-free and fail-open: any error produces no output and exit code 0.
 // Never logs tool inputs. Debug logging (AGENT_ORG_HOOK_DEBUG=1) records the tool name, agent_type,
 // the decision and the matched rule name only.
@@ -30,10 +36,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  appendLedger, approvalFor, effectiveType, home, isUnder, orgSubdir, readLedger, readState,
+  appendLedger, approvalFor, effectiveType, home, intentMeta, isUnder, orgSubdir, readLedger, readState,
   realpathLoose, resolvePath,
 } from './lib/state.mjs';
-import { repoOfFile, repoName, repoRoot } from './lib/repo.mjs';
+import { repoId, repoIdOfFile } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
 
 const DEBUG_FILE = path.join(os.homedir(), '.claude', 'agent-org', 'hook-debug.jsonl');
@@ -357,6 +363,8 @@ export function decide(payload, state = null, env = process.env) {
   const denies = [];
   const effects = [];
   const safe = (fn) => { try { fn(); } catch { /* each rule fails open on its own */ } };
+  const cwdRepo = () => repoId(cwd || process.cwd(), cwd);
+  const me = typeof payload.agent_id === 'string' ? payload.agent_id : undefined;
 
   // v0.1: command ask list.
   if (tool === 'Bash' || tool === 'PowerShell') {
@@ -364,6 +372,8 @@ export function decide(payload, state = null, env = process.env) {
     if (rule && specialist) {
       // v0.2e: a specialist's ask may never reach the user (auto mode, Phase 6/6b); deny instead.
       denies.push({ rule: `specialist-ask-list: ${rule}`, reason: `agent-org guard: agent-org specialists may not run ${rule}. Report it to the main thread; the main thread asks the user.` });
+      // v0.2.1 (V21-2): audited like every other guard deny (plan C1, B4). The pattern, never the command.
+      safe(() => effects.push({ kind: 'audit', repo: cwdRepo(), rec: { event: 'guard-deny', agent_id: me, agent_type: agentType, flags: ['specialist-ask-list', rule] } }));
     } else if (rule) {
       asks.push({ rule, reason: `agent-org guard: this command matches the ask list (${rule}). Confirm before it runs.` });
     }
@@ -372,7 +382,34 @@ export function decide(payload, state = null, env = process.env) {
   // v0.1: QA may only edit test paths.
   if (EDIT_TOOLS.has(tool) && agentType === QA_AGENT && !scratch && !isTestPath(editTarget(input), cwd)) {
     denies.push({ rule: 'qa-test-paths-only', reason: QA_REASON });
+    // v0.2.1 (V21-2): audited as a guard deny.
+    safe(() => effects.push({ kind: 'audit', repo: repoIdOfFile(editTarget(input), cwd), rec: { event: 'guard-deny', agent_id: me, agent_type: agentType, flags: ['qa-test-paths-only'] } }));
   }
+
+  // v0.2.1 (V21-10): an existing intent is never overwritten blind, and never edited from another session.
+  safe(() => {
+    if (!EDIT_TOOLS.has(tool)) return;
+    const target = editTarget(input);
+    if (!target) return;
+    const abs = resolvePath(target, cwd);
+    if (!orgSubdir('intents').some((d) => isUnder(abs, d))) return;
+    let text;
+    try { text = fs.readFileSync(abs, 'utf8'); } catch { return; } // a new file (or unreadable: fail open)
+    const owner = intentMeta(text).session;
+    const known = owner && owner !== 'unknown';
+    if (known && owner === payload.session_id) return;
+    let flag;
+    if (known) {
+      flag = 'intent-owner';
+      denies.push({ rule: 'intent-owner', reason: 'agent-org guard: this intent belongs to another session. Don\'t overwrite or edit it; save your intent as a new file (deliver step 3: get a path with record.mjs --intent-path <slug>, adding --supersedes <this intent> if yours continues it).' });
+    } else if (tool === 'Write') {
+      flag = 'intent-overwrite';
+      denies.push({ rule: 'intent-overwrite', reason: 'agent-org guard: an intent already exists at this path and records no owning session, so a Write would overwrite it blind. Save your intent as a new file (deliver step 3: record.mjs --intent-path <slug>), or Edit this one if it is yours.' });
+    } else {
+      return; // Edit of a v0.2.0 intent with no owner: allowed, as before (an Edit isn't blind).
+    }
+    effects.push({ kind: 'audit', repo: cwdRepo(), rec: { event: 'guard-deny', agent_id: me, agent_type: agentType || undefined, flags: [flag] } });
+  });
 
   // v0.2: audit and state protection (no state needed).
   safe(() => {
@@ -384,7 +421,6 @@ export function decide(payload, state = null, env = process.env) {
   // v0.2: same-group edit deny.
   safe(() => {
     if (!EDIT_TOOLS.has(tool) || !specialist || scratch || !ledger || !session) return;
-    const me = typeof payload.agent_id === 'string' ? payload.agent_id : null;
     const target = editTarget(input);
     if (!me || !target) return;
     const abs = path.resolve(cwd || '.', target);
@@ -411,7 +447,7 @@ export function decide(payload, state = null, env = process.env) {
       reason: `agent-org guard: ${rel} was changed by ${other.agent_type || 'another agent'} in this parallel group. Don't edit it; report BLOCKED: ${rel} changed by another agent.`,
     });
     effects.push({ kind: 'ledger', rec: { agent_id: me, agent_type: agentType, file: abs, collision: 'guard-deny' } });
-    effects.push({ kind: 'audit', repo: repoOfFile(abs, cwd), rec: { event: 'guard-deny', agent_id: me, agent_type: agentType, file: abs, flags: ['same-group-edit', `group: ${method}`] } });
+    effects.push({ kind: 'audit', repo: repoIdOfFile(abs, cwd), rec: { event: 'guard-deny', agent_id: me, agent_type: agentType, file: abs, flags: ['same-group-edit', `group: ${method}`] } });
   });
 
   // v0.2: team gate.
@@ -420,8 +456,8 @@ export function decide(payload, state = null, env = process.env) {
     const type = typeof input.subagent_type === 'string' ? input.subagent_type : '';
     if (!type.startsWith('agent-org:') || typeof input.name !== 'string' || !input.name) return;
     if (!session) return; // state unreadable: fail open
-    const repo = repoName(cwd || process.cwd(), cwd);
-    if (session.approvals.some((a) => a && a.repo === repo && a.mode === 'team')) return;
+    const repo = cwdRepo();
+    if (session.approvals.some((a) => a && a.repo === repo.key && a.mode === 'team')) return;
     denies.push({
       rule: 'team-gate',
       reason: 'agent-org guard: named agent-org dispatches start agent teams, and this session has no approved Mode: team. Dispatch without a name, or re-plan with the PM and get the team mode approved.',
@@ -441,7 +477,7 @@ export function decide(payload, state = null, env = process.env) {
       rule: 'team-start',
       reason: 'agent-org guard: this named dispatch would start an agent team (teams are enabled). Approve to start a team, or deny to have it dispatched without a name.',
     });
-    effects.push({ kind: 'audit', repo: repoName(cwd || process.cwd(), cwd), rec: { event: 'guard-ask', agent_type: type || null, flags: ['team-start'] } });
+    effects.push({ kind: 'audit', repo: cwdRepo(), rec: { event: 'guard-ask', agent_type: type || null, flags: ['team-start'] } });
   });
 
   // v0.2: scope growth (main thread only).
@@ -451,11 +487,12 @@ export function decide(payload, state = null, env = process.env) {
     if (!target) return;
     const abs = resolvePath(target, cwd);
     if (orgSubdir('').some((d) => isUnder(abs, d)) || isUnder(abs, path.join(home(), '.agent-org'))) return;
-    const repo = repoOfFile(abs, cwd);
+    const rid = repoIdOfFile(abs, cwd);
+    const repo = rid.key;
     if (approvalFor(session, repo)) return;
     const seen = Array.isArray(session.scope[repo]) ? session.scope[repo] : [];
     if (seen.some((f) => samePath(f, abs))) return; // already edited this session
-    const root = repoRoot(path.dirname(abs), cwd);
+    const root = rid.top;
     const rel = isUnder(abs, root) ? path.relative(root, abs) : abs;
     // Once per kind per repo per session: a kind already edited successfully doesn't ask again.
     const riskySeen = session.riskySeen && Array.isArray(session.riskySeen[repo]) ? session.riskySeen[repo] : [];

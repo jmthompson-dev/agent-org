@@ -10,6 +10,10 @@
 //         The PM is exempt from the report contract: it returns an intent (audited with outcome `plan`).
 //         v0.2e: with no last_assistant_message the report is the last SubagentHandback message (B-1); a report
 //         whose first line has no outcome falls back to its last `Outcome:` line, flagged `missing-outcome` (V-2).
+//   v0.2.1 (V21-1, Phase 6c false blocks): finished teammates' <teammate-message> reports join the relay pool; "none
+//         of" is a negation; status sentences, "verified" as an adjective, purpose clauses and list items whose bold
+//         label is negated, hedged or a goal are skipped; a turn whose only tool calls edit intent files may restate
+//         the previous turn's evidence; relay matching ignores a few filler words.
 // Blocks once (stop_hook_active false) with hookSpecificOutput.additionalContext (v0.2c: "Stop hook feedback",
 // Phase 6); on the second stop it only warns. Agent identity goes through effectiveType() (F1).
 // Fail-open, no content logged.
@@ -18,10 +22,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   filesOpenedInSession, filesSeenInOutput, finalAssistantText, isShell, lastHandbackMessage, readJsonl, refusedStaleEdits,
-  subagentTranscripts, succeeded, toolCalls, toolCallsInPreviousTurn, toolCallsInTurn,
+  subagentTranscripts, succeeded, teammateMessages, toolCalls, toolCallsInPreviousTurn, toolCallsInTurn,
 } from './lib/transcript.mjs';
-import { appendLedger, effectiveType, readLedger, readState, safeId, updateState } from './lib/state.mjs';
-import { repoName } from './lib/repo.mjs';
+import {
+  appendLedger, effectiveType, isUnder, orgSubdir, readLedger, readState, resolvePath, safeId, updateState,
+} from './lib/state.mjs';
+import { repoId } from './lib/repo.mjs';
 import { append as auditAppend } from './lib/audit.mjs';
 import { auditBase, lastOutcome, parseOutcome } from './record.mjs';
 
@@ -51,23 +57,54 @@ export function sentences(text) {
   return text.split(/(?<=[.!?])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
 }
 
+const DETERMINER = /\b(?:the|a|an|this|that|its|their|our|my|your)\s+$/i;
+function verifiedClaim(s) {
+  for (const m of s.matchAll(/\b[Vv]erified\b/g)) if (!DETERMINER.test(s.slice(0, m.index))) return true;
+  return false;
+}
+
 const CLAIMS = [
   { kind: 'tests', re: /\btests?:?\s+(?:all\s+)?(?:pass|passed|passes|passing)\b/i },
   { kind: 'tests', re: /\b\d+\s*\/\s*\d+\s+(?:tests?\s+)?(?:pass|passed|passing)\b/i },
   { kind: 'any', re: /\ball\s+(?:tests|checks)\s+(?:pass|passed|are\s+passing|green|are\s+green)\b/i },
   { kind: 'build', re: /\bbuild\s+(?:succeeds|succeeded|passes|passed)\b/i },
   { kind: 'any', re: /\bI\s+ran\b/i },
-  { kind: 'any', re: /\bverified\b/i },
+  // v0.2.1 (V21-1): all-caps VERIFIED is the intent status, and "the/a verified <noun>" is an adjective.
+  { kind: 'any', re: { test: (s) => verifiedClaim(s) } },
   { kind: 'any', re: /\bno\s+errors\b/i },
   { kind: 'lint', re: /\blints?\s+(?:is\s+|are\s+)?clean\b/i },
 ];
-const NEGATED = /\b(?:not|never|nothing|didn't|didn’t|haven't|haven’t|hasn't|wasn't|weren't|cannot|can't|unverified|retract\w*|would|should|if|unless)\b|n't\b/i;
+const NEGATED = /\b(?:not|never|nothing|none\s+of|not\s+yet|didn't|didn’t|haven't|haven’t|hasn't|wasn't|weren't|cannot|can't|unverified|retract\w*|would|should|if|unless)\b|n't\b/i;
 // v0.2c (F2): future-tense or plan sentences describe what will happen, not what did.
 const FUTURE = /\b(?:I'll|I’ll|I\s+will|will|going\s+to|once|after|before|next|then\s+I)\b/i;
 const skipSentence = (s) => NEGATED.test(s) || FUTURE.test(s);
 // v0.2e (V-3): hedges and estimates aren't claims ("roughly a 25% chance the test passes", Phase 6b).
 const HEDGE = /\b(?:roughly|chances?|probabl[ey]|likely|estimat\w*|might|may|could|expect\w*)\b/i;
-const skipClaim = (s) => skipSentence(s) || HEDGE.test(s);
+// v0.2.1 (V21-1): status sentences ("Status: …", "marked VERIFIED") and purpose clauses ("Goal: …", "so that",
+// "to make … pass") describe the plan, not a result.
+const STATUS = /(?:^|[\s*_>-])Status\s*:|\b(?:marked|set\s+to|moved\s+to)\s+(?:as\s+)?[*_`]*(?:VERIFIED|IMPLEMENTED|APPROVED|PROPOSED)\b/;
+const PURPOSE = /^[\s>*_#-]*(?:\d+[.)]\s*)?[*_]*(?:goals?|objectives?|purpose|aim)[*_]*\s*:|\bso\s+that\b|\bto\s+make\b[^.!?]*\bpass/i;
+const skipClaim = (s) => skipSentence(s) || HEDGE.test(s) || STATUS.test(s) || PURPOSE.test(s);
+
+// v0.2.1 (V21-1): a list item or line whose bold label is negated, hedged, future or a goal ("- **Likely cause
+// (from reading the code, not run yet):** …") qualifies every sentence after it on that line.
+const LABEL = /^\s*(?:[-*+]|\d+[.)])?\s*\*\*([^*\n]{1,120}?)\*\*/;
+export function labelSkips(line) {
+  const m = LABEL.exec(line);
+  return Boolean(m && (skipClaim(m[1]) || /^\s*(?:goals?|objectives?|purpose|aim)\s*:?\s*$/i.test(m[1])));
+}
+
+// Claimable sentences of a text, line by line, minus lines whose label qualifies them. v0.2.1: each sentence is
+// further split at `;`, so a negation, hedge or plan word covers only its own clause ("Not run yet: integration;
+// unit tests pass" still claims the unit tests).
+function claimSentences(text) {
+  const out = [];
+  for (const line of claimableText(text).split('\n')) {
+    if (!line.trim() || labelSkips(line)) continue;
+    for (const s of sentences(line)) out.push(...s.split(/;\s*/).map((c) => c.trim()).filter(Boolean));
+  }
+  return out;
+}
 
 const TEST_CMD = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|node\s+--test\b|pytest\b|python\d*(?:\.\d+)?\s+-m\s+(?:pytest|unittest)\b|mvnw?\b[^|;&]*\b(?:test|verify)\b|gradlew?\b[^|;&]*\btest\b|go\s+test\b|cargo\s+test\b|make\s+(?:test|check)\b|jest\b|vitest\b|deno\s+test\b|dotnet\s+test\b|rspec\b|phpunit\b|tox\b|ctest\b)/i;
 const BUILD_CMD = /\b(?:(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b|tsc\b|mvnw?\b[^|;&]*\b(?:package|install|compile|verify)\b|gradlew?\b[^|;&]*\b(?:build|assemble)\b|go\s+build\b|cargo\s+build\b|make\b|dotnet\s+build\b|vite\s+build\b|webpack\b|docker\s+build\b)/i;
@@ -83,18 +120,23 @@ function evidenceFor(kind, calls) {
 }
 
 const tokens = (s) => s.split(/[^a-z0-9]+/).filter(Boolean);
+// v0.2.1 (V21-1): filler words a faithful paraphrase adds or drops ("The other test passed every time" for
+// "Test 2 passed every time"). Words that change a claim's scope ("all", numbers) are not in the list.
+const FILLER = new Set(['the', 'a', 'an', 'other', 'its', 'their', 'it', 'this', 'that', 'also', 'still']);
 
 // Attribution prefix of a relayed sentence ("full-stack-developer reports:", "QA said"), up to 3 words before the verb.
 const ATTRIBUTION = /^\s*(?:\S+\s+){0,3}?(?:reports?|reported|says|said|confirms?|confirmed|returns?|returned|writes|wrote)\b\s*:?\s*/i;
 
-// The specialist sentences that may back a relay (v0.2d): claims that aren't negated or future-tense, from an
-// agent whose last stop passed its own check (`finished` recorded). Quoted text doesn't count, as on the main thread.
+// The specialist sentences that may back a relay (v0.2d): sentences that aren't negated, hedged or future-tense,
+// from an agent whose last stop passed its own check (`finished` recorded), or a teammate's idle report (V21-1).
+// v0.2.1: any such sentence, not only one the claim patterns match ("Test 2 passed every time" is a result too).
+// Quoted text doesn't count, as on the main thread.
 function relayableSentences(specialists) {
   const out = [];
   for (const sp of specialists) {
     if (!sp || !sp.finished || typeof sp.text !== 'string') continue;
-    for (const s of sentences(claimableText(sp.text))) {
-      if (!CLAIMS.some((c) => c.re.test(s)) || skipClaim(s)) continue;
+    for (const s of claimSentences(sp.text)) {
+      if (skipClaim(s)) continue;
       out.push(new Set(tokens(norm(s))));
     }
   }
@@ -104,7 +146,7 @@ function relayableSentences(specialists) {
 // v0.2d: a claim sentence is relayed when every word of it (attribution prefix removed) appears in one relayable
 // specialist sentence, so "X reports: Tests: PASS" matches "Tests: PASS (6/6)".
 export function isRelayed(sentence, specialists) {
-  const words = tokens(norm(sentence.replace(ATTRIBUTION, '')));
+  const words = tokens(norm(sentence.replace(ATTRIBUTION, ''))).filter((w) => !FILLER.has(w));
   if (!words.length) return false;
   return relayableSentences(specialists).some((st) => words.every((w) => st.has(w)));
 }
@@ -112,7 +154,7 @@ export function isRelayed(sentence, specialists) {
 // `specialists`: [{ id, text, finished }] from this session's subagent transcripts.
 export function findClaims(text, specialists = []) {
   const out = [];
-  for (const s of sentences(claimableText(text))) {
+  for (const s of claimSentences(text)) {
     const hit = CLAIMS.find((c) => c.re.test(s));
     if (!hit || skipClaim(s)) continue;
     if (isRelayed(s, specialists)) continue;
@@ -181,6 +223,13 @@ const short = (s) => (s.length > 80 ? `${s.slice(0, 77)}…` : s);
 // ---------------------------------------------------------------------------------------------
 // Stop (main thread)
 
+const INTENT_EDIT_TOOLS = new Set(['Edit', 'Write']);
+function isIntentEdit(call, cwd) {
+  if (!INTENT_EDIT_TOOLS.has(call.name) || typeof call.input.file_path !== 'string') return false;
+  const abs = resolvePath(call.input.file_path, call.cwd || cwd);
+  return orgSubdir('intents').some((d) => isUnder(abs, d));
+}
+
 export function checkStop(payload) {
   const text = typeof payload.last_assistant_message === 'string' ? payload.last_assistant_message : null;
   const entries = readJsonl(payload.transcript_path); // missing transcript → throws → no output
@@ -190,7 +239,8 @@ export function checkStop(payload) {
 
   // finished[agent_id] is recorded only on an unblocked SubagentStop; unreadable state → no relays recognized.
   let finished = {};
-  try { finished = readState(payload.session_id).finished || {}; } catch { finished = {}; }
+  let dispatch = {};
+  try { const st = readState(payload.session_id); finished = st.finished || {}; dispatch = st.dispatch || {}; } catch { finished = {}; }
   const subs = [];
   const specialists = [];
   for (const f of subagentTranscripts(payload.transcript_path, payload.session_id)) {
@@ -203,9 +253,19 @@ export function checkStop(payload) {
       specialists.push({ id, text, finished: Boolean(finished[id]) });
     } catch { /* skip */ }
   }
+  // v0.2.1 (V21-1): teammates report through <teammate-message> prompts in the lead's transcript. An idle
+  // notification's `result` is the teammate's report at a stop; a plain message counts once the teammate has
+  // finished (SubagentStop recorded for the agent the teammate name maps to).
+  try {
+    for (const m of teammateMessages(entries)) {
+      const ids = Object.keys(dispatch).filter((id) => (dispatch[id] && dispatch[id].name === m.teammate) || id.startsWith(`a${m.teammate}-`));
+      specialists.push({ id: `teammate:${m.teammate}`, text: m.text, finished: m.idle || ids.some((id) => finished[id]) });
+    }
+  } catch { /* fail open: no teammate relays */ }
   let calls = toolCallsInTurn(entries);
   // v0.2c: a turn with no tool calls (a summary or answer) may restate the previous turn's evidence.
-  if (!calls.length) calls = toolCallsInPreviousTurn(entries);
+  // v0.2.1 (V21-1): so may a turn whose only tool calls are edits to intent files (saving or updating the intent).
+  if (!calls.length || calls.every((c) => isIntentEdit(c, cwd))) calls = [...calls, ...toolCallsInPreviousTurn(entries)];
   const failures = [];
   const uncited = [];
   const kinds = new Set();
@@ -290,7 +350,7 @@ export function checkSubagentStop(payload) {
       updateState(sid, (s) => { s.finished[id] = new Date().toISOString(); return s; });
     }
   } catch { /* fail open */ }
-  const repo = repoName(payload.cwd || process.cwd(), payload.cwd);
+  const repo = repoId(payload.cwd || process.cwd(), payload.cwd);
   const base = auditBase(payload, repo);
   // Collision scan: refused "modified since read" edits (no hook sees them, P5 B2). Deduplicated by tool_use_id.
   try {
@@ -327,7 +387,7 @@ export function check(payload) {
   const r = event === 'SubagentStop' ? checkSubagentStop(payload) : event === 'Stop' ? checkStop(payload) : null;
   if (!r) return null;
   try {
-    const repo = repoName(payload.cwd || process.cwd(), payload.cwd);
+    const repo = repoId(payload.cwd || process.cwd(), payload.cwd);
     auditAppend(repo, {
       ...auditBase(payload, repo), event: 'claim-flag', agent_id: payload.agent_id, agent_type: r.agentType || payload.agent_type || undefined,
       flags: [...r.kinds.filter((k) => k !== 'refused-stale-edit'), r.out.systemMessage ? 'warned' : 'blocked'],

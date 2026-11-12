@@ -2,6 +2,8 @@
 //   ~/.agent-org/audit/<repo>.jsonl          active file; one JSON object per line
 //   ~/.agent-org/audit/<repo>.jsonl.<n>      rotated files, oldest first (log-rotation style: no repo name can clash)
 //   ~/.agent-org/state/audit-<repo>.head     {file, index, rotated, lines, bytes, lastHash}
+// v0.2.1 (V21-9, D31): <repo> is the repo key's directory form (lib/repo.mjs keyDir); lines carry `repo` (the D6
+// display name) and `key`. v0.2.0 files named by the D6 basename stay where they are and still verify.
 // Each line carries `prev` (the previous line's `h`) and `h` = sha256(prev + canonical(line without h)).
 // The chain runs across rotated files. Appends and head updates happen in one locked section.
 // Metadata only: never prompt text, commands, message bodies, file content or report text.
@@ -92,7 +94,10 @@ function scanTail(file) {
 }
 
 // Appends one record. Fields with undefined/null values are dropped. Returns the written record or null.
-export function append(repo, fields) {
+// `target` is a repo id from lib/repo.mjs ({key, dir, name}) or, as in v0.2.0, a plain file-name stem.
+export function append(target, fields) {
+  const id = target && typeof target === 'object' ? target : null;
+  const repo = id ? id.dir : target;
   const dir = auditRoot();
   fs.mkdirSync(dir, { recursive: true });
   fs.mkdirSync(stateRoot(), { recursive: true });
@@ -106,7 +111,8 @@ export function append(repo, fields) {
     }
     delete head.checkpoint; // v0.2c (F3): verify always walks whole files
     if (!Array.isArray(head.rotated)) head.rotated = rotatedFiles(repo, null);
-    const rec = { ts: new Date().toISOString(), repo: String(repo) };
+    const rec = { ts: new Date().toISOString(), repo: String(id ? id.name : repo) };
+    if (id && id.key) rec.key = String(id.key);
     for (const [k, v] of Object.entries(fields || {})) if (v !== undefined && v !== null && k !== 'prev' && k !== 'h') rec[k] = v;
     // Chain from the head, not the file: a truncated or edited tail then shows up as a break.
     rec.prev = head.lastHash || GENESIS;
