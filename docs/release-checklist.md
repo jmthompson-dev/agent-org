@@ -22,8 +22,31 @@ Record the result of each step (PASS / FAIL / NOT RUN, plus a note) in `reports/
 - **Never tell teammates to stay alive** (V21-6). Idle teammates already take direct messages, and a "keep alive" line in the intent makes them refuse the lead's later shutdown, since they treat it as a recorded user instruction. Send the messages in steps 6, 11 and 12 **directly to the teammate** (select it in the panel), with the exact text given.
 - Audit and intent paths use the **repo key** (v0.2.1): print it once with `node $P/hooks/record.mjs --intent-path probe` (it writes nothing) and use the `**Repo key:**` value, with `/` → `__`, as `<key>` below.
 - **Team prompt T** (names no hypotheses, 6c): `/agent-org:pm Find out why test/cache.test.js fails intermittently and fix it. I want two specialists investigating in parallel and sharing findings as they go: agent-org:full-stack-developer owns src/cache.js, agent-org:quality-assurance-architect owns test/cache.test.js. Propose Mode: team if the hand-off can't be pinned up front.`
-- **Level prompt L** (step 17, v0.2.2): `Move the cache's default settings into a new src/config.js, and update the imports in src/cache.js and test/cache.test.js. No behavior change.` It touches 3 files and hits no other trigger, the borderline Phase 10 measured (B3: Level 1 in 5/5 runs before v0.2.2, Level 2 in 3/3 after). The expected level is **2**. If `src/cache.js` has no default constant, add `export const DEFAULT_TTL = 1000;` at its top and commit before step 17.
+- **Level prompt L** (step 17, v0.2.2): `Move the cache's default settings into a new src/config.js, and update the imports in src/cache.js and test/cache.test.js. No behavior change.` It touches 3 files and hits no other trigger, the borderline Phase 10 measured (B3: Level 1 in 5/5 runs before v0.2.2, Level 2 in 3/3 after). The expected level is **2**. Before step 17, make sure the job really touches 3 files: `src/cache.js` exports a default constant (`export const DEFAULT_TTL = 1000;` at its top) and `test/cache.test.js` imports it from `../src/cache.js` and uses it (e.g. a test that `new Cache().ttl` equals `DEFAULT_TTL`); commit. (v0.2.2 run: without the test import, 2 of 3 sessions correctly saw a 2-file job and stayed at Level 1.)
 - **If the intent comes back `Mode: subagents`**, steps 3–6 and 11–12 can't run: reply `Use Mode: team for this job, with agent-org:quality-assurance-architect owning test/cache.test.js and agent-org:full-stack-developer owning src/cache.js; have the PM revise the intent with the justification. Don't investigate the cause yourself before approval.` and approve only an intent that says `Mode: team`. (In Phase 6b the PM pinned the hand-off, chose subagents, and no teammate formed.) Before steps 3–6 and 11–12, confirm the audit `dispatch` lines say `teammate_spawned`, not `async_launched`.
+
+## Driving the interactive steps from an agent (optional, v0.2.2)
+
+If you ask Claude to run the interactive steps for you, it drives a real Claude Code TUI in a `tmux` pane. This is how the v0.2.2 run did steps 2–7 and 9–13 (`reports/release-checklist-v0.2.2-2026-11-12.md`).
+
+- **tmux:** use the `tmux` on your PATH. On a Mac where `brew install tmux` fails (a Homebrew Tier 3 source build: "must give --enable-jemalloc or --disable-jemalloc"), build it from the tarball against Homebrew's `libevent`, `ncurses` and `utf8proc`, and keep those three installed. A tmux linked against them stops working if they're removed.
+  ```bash
+  B=$(brew --prefix); export PKG_CONFIG_PATH=$B/opt/libevent/lib/pkgconfig:$B/opt/ncurses/lib/pkgconfig:$B/opt/utf8proc/lib/pkgconfig
+  ./configure --prefix=$HOME/.local --disable-jemalloc --enable-utf8proc && make && make install
+  ```
+- **Socket:** pass a short socket path (`tmux -S /tmp/<short>.sock …`). A path inside a long scratchpad directory fails with "File name too long".
+- **Clean environment:** start `claude` in the pane with every `CLAUDE_*` variable it would inherit from the driving session unset (`CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_MESSAGING_*`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_PID`, `CLAUDE_EFFORT`), and set `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`. Otherwise the child runs with transcripts off ("Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker"), and the hooks and the evidence lose their transcripts.
+- **Flag:** if `~/.claude/settings.json` sets `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, a flag-unset step (1, 13) can override it per session with `--settings '{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"0"}}'`, so settings stay untouched.
+- **First launch:** the folder-trust prompt shows on first launch in a new scratch repo. Answer it only for the scratch repo you created.
+- **Never press a key while a permission prompt might be open.** Capture the pane first and send keys only if it shows no "Do you want…" prompt. In v0.2.2, arrow keys meant for the agent panel answered a teammate's edit prompt "No", and step 13 was lost.
+- **Prompts are answered as the user:**
+  - **Approve once by default.** "Don't ask again" is fine for read-only or test commands (`node *`, `npm test *`) in the scratch repo, after reading any script the agent wrote.
+  - **Never "don't ask again" for `git *`:** it would also allow `git push`.
+- **Agent panel:** with the input empty, ↓ enters the panel, ↑/↓ selects a row, and Enter opens that agent's view. Typed text then goes to that agent (the input reads `Message @<name>…`). Go back by selecting `main` the same way.
+  - **Shift+↓ changes the effort level**, not the selection.
+  - **Hidden rows:** idle teammates' rows hide 30 s after everything is idle, but the teammates stay addressable. To bring a row back, have the lead message the teammate by name.
+- **Ghost text:** grey suggestions in the input (e.g. "commit this") aren't typed text. Never press Enter on an empty-looking input.
+- **Cost:** `/cost` in the session prints the session's total. Read it before `/exit`, because an exited session can't show it any more.
 
 ## Steps
 
