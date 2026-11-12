@@ -50,3 +50,17 @@ Record the result of each step (PASS / FAIL / NOT RUN, plus a note) in `reports/
 
 - Delete the scratch repo; its `~/.agent-org/intents/<key>/`, `~/.agent-org/audit/<key>.jsonl*`, `~/.agent-org/state/audit-<key>.head` and the session state directories; its transcripts under `~/.claude/projects/<slug>/`; and any `~/.claude/teams/session-*` and `~/.claude/tasks/session-*` it created.
 - Write `reports/release-checklist-v<X.Y.Z>-<YYYY-MM-DD>.md`: one line per step (result and note), the Claude Code version, and the session ids.
+
+## Release (after GO)
+
+Push the persona repo first if the pin moved, then release and re-pin:
+
+```bash
+cd ~/git/agent-personas && git push origin main          # only if metadata.personasCommit isn't on GitHub yet
+cd ~/git/agent-org && git push origin development production v<X.Y.Z>
+claude plugin marketplace remove agent-org                # also uninstalls the plugin
+claude plugin marketplace add jmthompson-dev/agent-org@v<X.Y.Z>
+claude plugin install agent-org@agent-org                 # install, not update: the remove uninstalled it
+```
+
+Confirm: in a fresh session started **without** `--plugin-dir`, `/plugin` lists agent-org at `<X.Y.Z>`, enabled, with 14 agents.
