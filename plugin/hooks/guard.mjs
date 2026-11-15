@@ -359,6 +359,30 @@ export function docsOnlyPath(relPath) {
   } catch { return false; }
 }
 
+// v0.2.4 (D36): a docs-only edit carrying auth, secret, credential or infra content is a Level 2 trigger by itself.
+// D35 left that trigger to the model's level-check answers, and live runs answered no 4/4
+// (reports/release-checklist-v0.2.3-2026-11-15.md). Scans only the edit's own text (old and new), never stores it.
+// Word edges treat `_` as a separator so env-var names like CACHE_API_KEY match; `author` and `tokenizer` don't.
+// Bare "token" needs a qualifier (auth/access/API/... token, or *_TOKEN) so "token budget" and "design tokens" don't
+// trigger; IAM and TOKEN are matched case-sensitively for the same reason. The text is NFKC-normalized with format
+// characters (zero-width etc.) removed, and tested both as is and with camelCase split (clientSecret, dbPassword).
+const SENSITIVE_DOC = /(?<![a-z0-9])(?:auth(?:n|z|enticat[a-z]*|ori[sz][a-z]*)?|oauth2?|oidc|saml|sso|jwt|bearer|(?:auth|access|bearer|refresh|session|api|id|oauth|csrf|personal[\s_-]?access)[\s_-]?tokens?|api[\s_-]?keys?|access[\s_-]?keys?|secrets?|passwords?|passwd|passphrases?|credentials?|private[\s_-]?keys?|ssh|kubeconfig|terraform|kubernetes|k8s|helm|ansible|rbac|ci\/cd|github[\s_-]?actions|infrastructure|iac)(?![a-z0-9])/i;
+const SENSITIVE_DOC_CS = /(?<![A-Za-z0-9])(?:IAM|TOKEN)(?![A-Za-z0-9])|[A-Za-z0-9]_TOKENS?(?![A-Za-z0-9])/;
+const sensitiveText = (t) => {
+  const n = t.normalize('NFKC').replace(/\p{Cf}/gu, '');
+  return [n, n.replace(/([a-z0-9])([A-Z])/g, '$1 $2')].some((x) => SENSITIVE_DOC.test(x) || SENSITIVE_DOC_CS.test(x));
+};
+// Reads Edit/Write fields; `edits[]` and `new_source` are scanned defensively (MultiEdit isn't a guarded tool and
+// notebooks are never docs-only, so they don't reach the content floor today).
+export function sensitiveDocContent(input) {
+  try {
+    if (!input || typeof input !== 'object') return false;
+    const parts = [input.content, input.new_string, input.old_string, input.new_source];
+    if (Array.isArray(input.edits)) for (const e of input.edits) if (e && typeof e === 'object') parts.push(e.old_string, e.new_string);
+    return parts.some((t) => typeof t === 'string' && sensitiveText(t));
+  } catch { return true; } // fail closed: treat as sensitive
+}
+
 // ---------------------------------------------------------------------------------------------
 // v0.2.2 (D34): the level check
 
@@ -601,7 +625,7 @@ export function decide(payload, state = null, env = process.env) {
   });
 
   // v0.2.2 (D34): the level gate for one main-thread edit inside the cwd's repo.
-  const levelGate = (pid, abs, rid) => {
+  const levelGate = (pid, abs, rid, sensitive = false) => {
     const repo = rid.key;
     const chk = session.levels && session.levels[pid];
     if (!chk || typeof chk.level !== 'number') {
@@ -617,11 +641,21 @@ export function decide(payload, state = null, env = process.env) {
     }
     const byRepo = session.reqFiles && session.reqFiles[pid] && typeof session.reqFiles[pid] === 'object' ? session.reqFiles[pid] : {};
     const files = Array.isArray(byRepo[repo]) ? byRepo[repo] : [];
+    const relOf = (f) => (isUnder(f, rid.top) ? path.relative(rid.top, f) : f);
+    const rel = relOf(abs);
+    // v0.2.4 (D36): a docs-only edit with auth, secret, credential or infra terms is a Level 2 trigger by itself,
+    // even on a file already edited in this request (D35 Q1, enforced here instead of left to the level check).
+    if (sensitive && docsOnlyPath(rel)) {
+      const floor = ['docs-content'];
+      denies.push({ rule: 'level-floor-content', reason: `agent-org guard: this edit to ${rel} has auth, secret, credential or infra content, which the level check answered no. Docs with that content keep their trigger (D35, D36), so this request is now Level 2: load the agent-org:deliver skill; nothing is implemented without an approved intent.` });
+      effects.push({ kind: 'level', promptId: pid, rec: { level: 2, source: 'floor', repo, answers: chk.answers || null } });
+      effects.push({ kind: 'audit', repo: rid, rec: { event: 'level', level: 2, source: 'floor', prompt: pid, floor } });
+      return;
+    }
     if (files.some((f) => samePath(f, abs))) return; // already edited in this request
-    const rel = isUnder(abs, rid.top) ? path.relative(rid.top, abs) : abs;
     const kinds = riskyKinds(rel);
     // v0.2.3 (D35, P7): docs-only files are recorded in reqFiles but don't count toward the floor of more than 2.
-    const counted = files.filter((f) => !docsOnlyPath(isUnder(f, rid.top) ? path.relative(rid.top, f) : f)).length;
+    const counted = files.filter((f) => !docsOnlyPath(relOf(f))).length;
     let floor = null;
     let reason = null;
     if (kinds.length) {
@@ -658,7 +692,7 @@ export function decide(payload, state = null, env = process.env) {
     const inCwdRepo = cwdId && rid.top && samePath(rid.top, cwdId.top)
       && (isUnder(abs, cwdId.top) || isUnder(realpathLoose(abs), realpathLoose(cwdId.top)));
     if (pid && inCwdRepo) {
-      levelGate(pid, abs, rid);
+      levelGate(pid, abs, rid, sensitiveDocContent(input));
       return;
     }
     const seen = Array.isArray(session.scope[repo]) ? session.scope[repo] : [];

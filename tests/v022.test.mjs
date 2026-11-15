@@ -232,8 +232,8 @@ const withKey = (k, v) => str({ ...all('n'), [k]: v });
   const pm = fs.readFileSync(path.join(P, 'agents/principal-project-manager.md'), 'utf8');
   ok('PM binding: the main thread\'s level check sets the floor', /triggers and the main thread's level check set the floor/.test(pm));
   const pj = JSON.parse(fs.readFileSync(path.join(P, '.claude-plugin/plugin.json'), 'utf8'));
-  // v0.2.3 (D35): version bump.
-  ok('plugin.json version 0.2.3', pj.version === '0.2.3');
+  // v0.2.4 (D36): version bump.
+  ok('plugin.json version 0.2.4', pj.version === '0.2.4');
 }
 
 // ---------------------------------------------------------------- Phase 10 C0: Grep or Read path:line pairs count as opened

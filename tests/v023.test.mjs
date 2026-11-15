@@ -303,7 +303,7 @@ const grepc = (file, s) => fs.readFileSync(path.join(P, '..', file), 'utf8').spl
   }
   ok('pinned: level.mjs contains "docs-only"', grepc('plugin/hooks/lib/level.mjs', 'docs-only') >= 1);
   ok('pinned: docs/decisions.md contains "### D35."', grepc('docs/decisions.md', '### D35.') >= 1);
-  ok('pinned: plugin.json contains "version": "0.2.3"', grepc('plugin/.claude-plugin/plugin.json', '"version": "0.2.3"') >= 1);
+  ok('pinned: plugin.json contains "version": "0.2.4"', grepc('plugin/.claude-plugin/plugin.json', '"version": "0.2.4"') >= 1);
   for (const s of ['Never dispatch a fixer agent.', 'Never commit, push or tag', '**Level 3 claim reproduction:**', 'Unsure counts as yes.']) {
     ok(`unchanged: deliver SKILL.md still contains "${s}"`, grepc(SK, s) >= 1);
   }
