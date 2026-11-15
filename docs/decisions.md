@@ -221,3 +221,29 @@ The last two raise the request to Level 2 (`level` event, source `floor`). Files
 - **File counts:** `files` takes a file count (more than 2 → y), because 8 of 33 first checks answered `files=2`.
 - **Wording:** the `behavior` and `proddata` questions follow the D5 wording above.
 
+## v0.2.3
+
+### D35. Cut five kinds of low-value ceremony, keep every protection — Decided; hook behavior unit-tested (`tests/v023.test.mjs`); live behavior unobserved until reinstall
+A day of home-lab infra work showed approvals and stops that caught nothing. Five changes:
+1. **Plan fixes.** The PM may fix its own acceptance-check commands, typos or wording after approval if all four hold: no scope change, no file outside the plan, no level or trigger change, no owner-condition change. The main thread logs `PLAN-FIX <date> <section>: …` in `## Plan fixes`, then applies the edit; the final report lists every one. Anything else is a re-plan and a new approval. The hook still flags the edit as `intent-edited-after-approval` and adds `plan-fix-logged` when a matching entry exists.
+2. **Sequential same-type auto-accept.** `record.mjs --ledger` prints `SEQUENTIAL same-type: <file> (<id1> then <id2>)` instead of `COLLISION` when every id has the same agent type, none is a teammate, and each finished before the next one's first ledger row. The main thread accepts it only for planned tasks or logged `SMALL-FIX` passes on files in that task's Owns. Overlap, missing `finished`, different types, the same-group deny and stale-read refusals still stop.
+3. **Small fixes.** A fix inside the PR's concern, in a planned file, is a second pass by the owning specialist, logged as `SMALL-FIX`. A file outside the plan needs the owner's one-line yes plus a `PLAN-FIX` for Owns. A follow-up PR is for a separate concern only, named in the final report.
+4. **Owner conditions.** Conditions attached to an approval become `OC-n` items in `## Owner conditions`, copied verbatim, each with a gate (default `VERIFIED`); only the owner waives one. The approval line reads `APPROVED <date> by user, conditions OC-1..OC-n`. Every main-thread report starts with `Owner conditions:`. No gated step passes while one is open. Detect-only flag: `owner-condition-open` when Status goes to `VERIFIED` with an unchecked item.
+5. **Docs-only is Level 1.** `docsOnlyPath` (`.md`, `.mdx`, `.rst` or `.txt` files with no risky kind; other files in `docs/`, such as `.env`, keys or YAML, are not docs-only) isn't counted toward the third-file floor. Docs with any auth, secret, credential or infra content keep those triggers. At Level 1 the repo's configured secret scanner runs if there is one; a finding or reviewer flag escalates; otherwise no separate security retest.
+
+**Unchanged:** approval for destructive, host-config, credential and authz changes; InfoSec when auth, secrets or infra fire; Level 3 independent QA and claim reproduction; never printing secrets; `riskyKinds` and the risky-path floor; the same-group edit deny; stale-read refusals; the team gate; the legacy D28 asks.
+
+**Accepted non-blocking defaults (approved with the intent):**
+- Prompt-like Markdown (`SKILL.md`, `CLAUDE.md`, `AGENTS.md`, `.md` under `agents/`, `skills/`, `commands/`, `hooks/`, `.claude/`) and non-doc `.txt` (`requirements*.txt`, `constraints*.txt`, `CMakeLists.txt`) are excluded from docs-only, so they still count toward the floor.
+- Rule-card word ceiling raised from 195 to 205 (`tests/v022.test.mjs`).
+- No InfoSec review of the floor change: the risky-path floor is untouched and tested.
+- Worked examples live in the PR description only, not in the repo.
+
+**Owner dispositions after QA (2026-11-15):** Q1 any auth, secret, credential or infra content in docs keeps its trigger (no "merely mentions" carve-out); Q2 the `docs/` directory clause is dropped (redundant with the extension test); Q3 ledger gap accepted; Q4 whitespace fixed.
+
+**Known limit (R2):** `plan-fix-logged` can match an earlier entry for the same section, so it shows a log line exists, not that this edit matches it. It is detect-only; the `intent-edited-after-approval` flag stays.
+
+**Known limit (ledger):** the ledger doesn't record Bash edits (e.g. the v0.2.3 `plugin.json` bump had no ledger row); the deliver check against `git diff --name-only` is what catches them.
+
+**Known limit (P2/P3):** a last pass still running prints SEQUENTIAL (the main thread waits for every report anyway); each Write that leaves Status VERIFIED re-raises `owner-condition-open`; only `- [ ]` items are detected, as the template mandates.
+

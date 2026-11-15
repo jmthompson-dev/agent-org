@@ -1,6 +1,6 @@
 agent-org levels (triggers set the floor; unsure counts as yes):
 - 0: question, read-only lookup, docs typo; no agents.
-- 1: ≤ 2 files, no trigger; copy-only edits and bug fixes restoring intended behavior too. Then run the repo's tests, if any, and report.
+- 1: ≤ 2 files (docs-only paths excluded), no trigger; copy-only edits and bug fixes restoring intended behavior too. Then run the repo's tests, if any, and report.
 - 2: any of: > 2 files or > 1 module; public API/contract; schema/migration; new/upgraded dependency; auth/authz; secrets/credentials; CI/CD or infra/IaC; cross-service integration; user-visible behavior change (what the user can do or the system returns).
 - 3: auth/authz redesign; sensitive data; production data migration (moving, transforming, deleting or backfilling existing data); multi-service architecture; production release/deploy; significant AI/ML platform work.
 

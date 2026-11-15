@@ -338,6 +338,27 @@ export function riskyKinds(relPath) {
   return kinds;
 }
 
+// v0.2.3 (D35, P7): a docs-only path doesn't count toward the level gate's more-than-2-files floor. True iff the
+// extension is .md/.mdx/.rst/.txt, no risky kind matches, and the path isn't prompt-like Markdown or a non-doc .txt.
+// The `docs` directory clause was dropped as redundant with the extension test (Q2, D35): other files under docs/
+// (.env, keys, YAML, images) are not docs-only. The risky-path floor itself is unchanged.
+export function docsOnlyPath(relPath) {
+  try {
+    if (typeof relPath !== 'string' || !relPath) return false;
+    const parts = relPath.replace(/\\/g, '/').split('/').filter(Boolean);
+    const base = parts[parts.length - 1] || '';
+    const lbase = base.toLowerCase();
+    const dirs = parts.slice(0, -1).map((d) => d.toLowerCase());
+    const docExt = /\.(?:md|mdx|rst|txt)$/i.test(base);
+    if (!docExt) return false;
+    if (riskyKinds(relPath).length) return false;
+    if (/^(?:requirements|constraints)[^/]*\.txt$/.test(lbase) || lbase === 'cmakelists.txt') return false;
+    if (['skill.md', 'claude.md', 'agents.md'].includes(lbase)) return false;
+    if (/\.md$/i.test(base) && dirs.some((d) => ['agents', 'skills', 'commands', 'hooks', '.claude'].includes(d))) return false;
+    return true;
+  } catch { return false; }
+}
+
 // ---------------------------------------------------------------------------------------------
 // v0.2.2 (D34): the level check
 
@@ -599,15 +620,17 @@ export function decide(payload, state = null, env = process.env) {
     if (files.some((f) => samePath(f, abs))) return; // already edited in this request
     const rel = isUnder(abs, rid.top) ? path.relative(rid.top, abs) : abs;
     const kinds = riskyKinds(rel);
+    // v0.2.3 (D35, P7): docs-only files are recorded in reqFiles but don't count toward the floor of more than 2.
+    const counted = files.filter((f) => !docsOnlyPath(isUnder(f, rid.top) ? path.relative(rid.top, f) : f)).length;
     let floor = null;
     let reason = null;
     if (kinds.length) {
       const keys = [...new Set(kinds.map((k) => RISKY_KEY[k]))];
       floor = kinds;
       reason = `agent-org guard: ${kinds.map((k) => RISKY_LABELS[k]).join(' and ')} path, which the level check answered no (${keys.join(', ')}). That's a Level 2 trigger, so this request is now Level 2: load the agent-org:deliver skill; nothing is implemented without an approved intent.`;
-    } else if (files.length + 1 > 2) {
+    } else if (!docsOnlyPath(rel) && counted + 1 > 2) {
       floor = ['files'];
-      reason = `agent-org guard: this would be file ${files.length + 1} of this request, and more than 2 files is Level 2 (D5). This request is now Level 2: load the agent-org:deliver skill; nothing is implemented without an approved intent.`;
+      reason = `agent-org guard: this would be file ${counted + 1} of this request, and more than 2 files is Level 2 (D5). This request is now Level 2: load the agent-org:deliver skill; nothing is implemented without an approved intent.`;
     }
     if (floor) {
       denies.push({ rule: `level-floor-${floor[0] === 'files' ? 'files' : 'path'}`, reason });
