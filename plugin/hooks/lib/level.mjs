@@ -7,15 +7,15 @@
 
 // [key, question]. The order is the D5 order, and the template below follows it.
 export const LEVEL2 = [
-  ['files', 'more than 2 files, or more than one module (a file count is accepted: files=3 means y)'],
+  ['files', 'more than 2 files, or more than one module (a file count is accepted: files=3 means y; docs-only files with no auth, secret, credential or infra content don\'t count)'],
   ['api', 'public API or contract change'],
   ['schema', 'schema or migration'],
   ['dep', 'new or upgraded dependency'],
-  ['auth', 'auth or authz'],
-  ['secrets', 'secrets or credentials'],
-  ['infra', 'CI/CD or infra/IaC'],
+  ['auth', 'auth or authz (any auth or authz content is y, docs-only changes included)'],
+  ['secrets', 'secrets or credentials (any secret or credential content is y, docs-only changes included)'],
+  ['infra', 'CI/CD or infra/IaC (any CI/CD or infra content is y, docs-only changes included)'],
   ['xservice', 'cross-service integration'],
-  ['behavior', 'user-visible behavior change: what the user can do or what the system returns (a bug fix that restores intended behavior, and copy-only text changes, are n)'],
+  ['behavior', 'user-visible behavior change: what the user can do or what the system returns (a bug fix that restores intended behavior, docs-only changes, and copy-only text changes, are n)'],
 ];
 export const LEVEL3 = [
   ['redesign', 'auth/authz redesign'],

@@ -70,7 +70,53 @@ export function intentApproval(text) {
 // After approval the main thread may edit only the status line, the approval log and the evidence or
 // validation sections (B6). Returns the `## ` heading an Edit landed in when it's outside those, else null.
 const STATUS_LINE = /^\s*\*\*Status:\*\*/;
-const ALLOWED_SECTION = /^(?:approval log|evidence|validation)\b/i;
+const ALLOWED_SECTION = /^(?:approval log|evidence|validation|plan fixes|owner conditions)\b/i;
+
+// The body of the `## <name>` section (case-insensitive), up to the next `## ` heading; '' if absent.
+function sectionBody(text, name) {
+  const lines = text.split('\n');
+  const out = [];
+  let inside = false;
+  for (const l of lines) {
+    const h = /^##[ \t]+(.+?)[ \t#]*$/.exec(l);
+    if (h) { inside = h[1].trim().toLowerCase() === name; continue; }
+    if (inside) out.push(l);
+  }
+  return out.join('\n');
+}
+
+// v0.2.3 (D35, P2): does the post-edit `## Plan fixes` section have a PLAN-FIX line whose <section> (the text
+// between the date and the first `:`) equals the edited heading, case-insensitively? Detect-only; an earlier entry
+// for the same section also matches (R2).
+export function planFixLogged(text, heading) {
+  if (typeof text !== 'string' || typeof heading !== 'string' || !heading) return false;
+  const want = heading.trim().toLowerCase();
+  for (const l of sectionBody(text, 'plan fixes').split('\n')) {
+    const m = /PLAN-FIX\s+\S+\s+([^:]+):/.exec(l);
+    if (m && m[1].trim().toLowerCase() === want) return true;
+  }
+  return false;
+}
+
+// v0.2.3 (D35, P2): ['OC-<n>', …] when this edit adds a `**Status:** VERIFIED` line (not in oldString; a Write passes
+// null for newString and counts when the file is VERIFIED) and `## Owner conditions` has an unchecked `- [ ]` item.
+const STATUS_VERIFIED = /^\s*\*\*Status:\*\*\s*VERIFIED\b/;
+export function ownerConditionsOpen(text, newString, oldString) {
+  if (typeof text !== 'string') return [];
+  if (typeof newString === 'string') {
+    const before = new Set(typeof oldString === 'string' ? oldString.split('\n').map((l) => l.trim()) : []);
+    if (!newString.split('\n').some((l) => STATUS_VERIFIED.test(l) && !before.has(l.trim()))) return [];
+  } else if (!text.split('\n').some((l) => STATUS_VERIFIED.test(l))) return [];
+  const ids = [];
+  let n = 0;
+  for (const l of sectionBody(text, 'owner conditions').split('\n')) {
+    if (!/^\s*- \[ \]/.test(l)) continue;
+    n++;
+    const m = /\bOC-(\d+)/.exec(l);
+    ids.push(m ? `OC-${m[1]}` : `OC-?${n}`);
+  }
+  return ids;
+}
 // v0.2.1 (Phase 9): with `oldString`, only lines the edit adds or changes count, so a status edit that carries the
 // unchanged `**Repo key:**` line below it (to make old_string unique) isn't flagged.
 export function intentEditSection(text, newString, oldString) {
@@ -164,9 +210,20 @@ export function record(payload) {
         if (wasApproved && tool === 'Edit') {
           const section = intentEditSection(text, input.new_string, input.old_string);
           if (section) {
+            const flags = ['intent-edited-after-approval', section];
+            if (planFixLogged(text, section)) flags.push('plan-fix-logged'); // v0.2.3 (D35, P2)
+            auditAppend(target, {
+              session: sid, intent: id, event: 'claim-flag', tool_use_id: payload.tool_use_id, flags,
+            });
+          }
+        }
+        // v0.2.3 (D35, P2): VERIFIED while an owner condition is still open (ids only, never condition text).
+        if (wasApproved && (tool === 'Edit' || tool === 'Write')) {
+          const open = ownerConditionsOpen(text, tool === 'Edit' ? input.new_string : null, tool === 'Edit' ? input.old_string : null);
+          if (open.length) {
             auditAppend(target, {
               session: sid, intent: id, event: 'claim-flag', tool_use_id: payload.tool_use_id,
-              flags: ['intent-edited-after-approval', section],
+              flags: ['owner-condition-open', ...open],
             });
           }
         }
@@ -269,9 +326,43 @@ export function ledgerSummary(sessionId) {
     for (const c of a.collisions) lines.push(`  COLLISION ${c}`);
   }
   const shared = [...byFile].filter(([, s]) => s.size > 1);
-  for (const [f, s] of shared) lines.push(`COLLISION changed by ${s.size} agents: ${f} (${[...s].join(', ')})`);
+  // v0.2.3 (D35, P3): a file changed by several ids is SEQUENTIAL same-type, not a collision, when every id has the
+  // same agent_type, none is a teammate, and (ordered by first ledger row) each id finished before the next id's
+  // first row. A missing `finished` (blocked or crashed stop) or a missing ts falls back to COLLISION.
+  const first = new Map();
+  ledger.forEach((r, i) => {
+    const key = r.agent_id || '(unknown)';
+    if (!first.has(key)) first.set(key, { i, t: Date.parse(r.ts) });
+  });
+  const sequential = (ids) => {
+    try {
+      if (!state) return false;
+      if (ids.some((id) => typeof agents.get(id).agent_type !== 'string' || !agents.get(id).agent_type)) return false;
+      if (new Set(ids.map((id) => agents.get(id).agent_type)).size !== 1) return false;
+      if (ids.some((id) => state.dispatch[id] && state.dispatch[id].teammate)) return false;
+      for (let k = 0; k < ids.length - 1; k++) {
+        const fin = Date.parse(state.finished[ids[k]]);
+        const next = first.get(ids[k + 1]).t;
+        if (!Number.isFinite(fin) || !Number.isFinite(next) || !(fin < next)) return false;
+      }
+      return true;
+    } catch { return false; }
+  };
+  let nSeq = 0;
+  let nColl = 0;
+  for (const [f, s] of shared) {
+    const ids = [...s].sort((a, b) => (first.get(a).t - first.get(b).t) || (first.get(a).i - first.get(b).i));
+    if (sequential(ids)) {
+      nSeq++;
+      lines.push(`SEQUENTIAL same-type: ${f} (${ids.join(' then ')})`);
+    } else {
+      nColl++;
+      lines.push(`COLLISION changed by ${s.size} agents: ${f} (${[...s].join(', ')})`);
+    }
+  }
   if (!agents.size) lines.push('no agent-org specialist edits recorded in this session');
-  const flagged = shared.length + [...agents.values()].reduce((n, a) => n + a.collisions.length, 0);
+  const flagged = nColl + [...agents.values()].reduce((n, a) => n + a.collisions.length, 0);
+  if (nSeq) lines.push(`sequential same-type: ${nSeq} (accept only if planned; see deliver step 6)`);
   lines.push(flagged ? `collision flags: ${flagged}` : 'collision flags: none');
   return lines.join('\n');
 }

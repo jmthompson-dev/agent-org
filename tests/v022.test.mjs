@@ -220,7 +220,8 @@ const withKey = (k, v) => str({ ...all('n'), [k]: v });
   ok('rule card: the plugin root is filled in and the command is the guard\'s exact shape', card.includes(`node "${path.dirname(H)}/hooks/record.mjs" --level-check "${L.TEMPLATE}"`) && !card.includes('{{AGENT_ORG_ROOT}}'));
   const raw = fs.readFileSync(path.join(H, 'rule-card.md'), 'utf8');
   const words = raw.split(/\s+/).filter(Boolean).length;
-  ok(`rule card: ${words} words (≤ 195), no "Plan:" rule, copy-only edits are Level 1, unsure counts as yes`, words <= 195 && !raw.includes('Plan:') && /copy-only edits and bug fixes restoring intended behavior too/.test(raw) && /production data migration \(moving, transforming, deleting or backfilling existing data\)/.test(raw) && /unsure counts as yes/.test(raw) && /what the user can do or the system returns/.test(raw));
+  // v0.2.3 (D35): ceiling raised from 195 to 205 for the docs-only clause.
+  ok(`rule card: ${words} words (≤ 205), no "Plan:" rule, copy-only edits are Level 1, unsure counts as yes`, words <= 205 && !raw.includes('Plan:') && /copy-only edits and bug fixes restoring intended behavior too/.test(raw) && /production data migration \(moving, transforming, deleting or backfilling existing data\)/.test(raw) && /unsure counts as yes/.test(raw) && /what the user can do or the system returns/.test(raw));
   const nudge = run('escalate.mjs', { prompt: 'add a schema migration' }).json?.hookSpecificOutput?.additionalContext || '';
   ok('escalate: the nudge points at the level check', /level check before any file edit/.test(nudge) && /unsure counts as yes/.test(nudge));
   const deliver = fs.readFileSync(path.join(P, 'skills/deliver/SKILL.md'), 'utf8');
@@ -231,7 +232,8 @@ const withKey = (k, v) => str({ ...all('n'), [k]: v });
   const pm = fs.readFileSync(path.join(P, 'agents/principal-project-manager.md'), 'utf8');
   ok('PM binding: the main thread\'s level check sets the floor', /triggers and the main thread's level check set the floor/.test(pm));
   const pj = JSON.parse(fs.readFileSync(path.join(P, '.claude-plugin/plugin.json'), 'utf8'));
-  ok('plugin.json version 0.2.2', pj.version === '0.2.2');
+  // v0.2.3 (D35): version bump.
+  ok('plugin.json version 0.2.3', pj.version === '0.2.3');
 }
 
 // ---------------------------------------------------------------- Phase 10 C0: Grep or Read path:line pairs count as opened
