@@ -1,5 +1,5 @@
-// agent-org v0.2.4 tests (D36): a docs-only file whose edit carries auth, secret, credential or infra content counts
-// toward the level gate's more-than-2-files floor again. Usage: node tests/v024.test.mjs [<plugin dir>]
+// agent-org v0.2.4 tests (D36): a docs-only edit carrying auth, secret, credential or infra content is a Level 2
+// trigger by itself (the guard floors the request to Level 2). Usage: node tests/v024.test.mjs [<plugin dir>]
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
 import { spawnSync, execFileSync } from 'node:child_process'; import { fileURLToPath, pathToFileURL } from 'node:url';
 const P = path.resolve(process.argv[2] || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugin'));
@@ -28,7 +28,8 @@ const ANS_N = L.KEYS.map((k) => `${k}=n`).join(' ');
   const yes = [
     'Never store auth tokens, API keys or other credentials in the cache.',
     'Set the CACHE_API_KEY environment variable.',
-    'Rotate the client secret quarterly.', 'Log in with your password.', 'Uses OAuth2 with OIDC.', 'Pass a Bearer header.',
+    'Rotate the client secret quarterly.', 'config: { clientSecret }', 'Set authToken in the config.', 'The dbPassword field.', 'Pass accessToken.', 'Export GITHUB_TOKEN first.', 'Send the TOKEN header.', 'Use a refresh token.', 'Uses GitHub Actions.',
+    'pass\u200bword is required', '\uff50\uff41\uff53\uff53\uff57\uff4f\uff52\uff44 field', 'Log in with your password.', 'Uses OAuth2 with OIDC.', 'Pass a Bearer header.',
     'Store the private key in the vault.', 'See the AWS access key docs.', 'Requires SSH.', 'Deployed with Terraform on Kubernetes (k8s) via Helm.',
     'Grant the IAM role; RBAC applies.', 'Our CI/CD runs on GitHub Actions.', 'Authentication and authorization flow.', 'authn vs authz',
     'Copy your kubeconfig.', 'The JWT expires.', 'SSO via SAML.', 'Infrastructure as code (IaC).',
@@ -37,13 +38,13 @@ const ANS_N = L.KEYS.map((k) => `${k}=n`).join(' ');
   const no = [
     'Entries expire once older than the TTL (default 1000 ms).', 'Written by the author.', 'A tokenizer splits words.',
     'Keys are strings; values are anything.', 'The secretary role.', 'Authored in 2026.', 'See the tutorial on caching.',
-    'Install with npm install.', 'Run the test suite.', 'A passing grade.',
+    'Install with npm install.', 'Run the test suite.', 'A passing grade.', 'Token budget per agent.', 'Use design tokens for colors.', 'Token count: 4k.', 'iam not sure.',
   ];
   for (const t of no) ok(`not sensitive: "${t}" → false`, s({ new_string: t }) === false);
   ok('sensitive: Write content is scanned', s({ content: '# Setup\nexport API_TOKEN=...' }) === true);
   ok('sensitive: old_string is scanned (removing a credential warning counts)', s({ old_string: 'Never log passwords.', new_string: '' }) === true);
-  ok('sensitive: MultiEdit-style edits[] are scanned', s({ edits: [{ old_string: 'a', new_string: 'b' }, { old_string: 'x', new_string: 'use the secret' }] }) === true);
-  ok('sensitive: NotebookEdit new_source is scanned', s({ new_source: 'password = input()' }) === true);
+  ok('sensitive (pure function only; MultiEdit is not a guarded tool): edits[] are scanned', s({ edits: [{ old_string: 'a', new_string: 'b' }, { old_string: 'x', new_string: 'use the secret' }] }) === true);
+  ok('sensitive (pure function only; notebooks are never docs-only): new_source is scanned', s({ new_source: 'password = input()' }) === true);
   ok('sensitive: bad input → false', s(null) === false && s(undefined) === false && s('str') === false && s({}) === false);
 }
 
@@ -57,41 +58,59 @@ const ANS_N = L.KEYS.map((k) => `${k}=n`).join(' ');
   const key = repo.repoId(W).key;
   const WARN = 'Never store auth tokens, API keys or other credentials.';
 
+  const isContentFloor = (x) => decisionOf(x) === 'deny' && /auth, secret, credential or infra content/.test(reasonOf(x)) && /Level 2/.test(reasonOf(x));
+  const floorLines = (pid) => { try { return fs.readdirSync(path.join(HOME, '.agent-org/audit')).flatMap((f) => fs.readFileSync(path.join(HOME, '.agent-org/audit', f), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))).filter((d) => d.event === 'level' && d.prompt === pid && d.source === 'floor'); } catch { return []; } };
+
   // The v0.2.3 checklist failure D-b: src/cache.js + README.md + docs/usage.md with a credential warning.
   check('p1');
-  let r = [edit('p1', 'src/cache.js', 'entry'), edit('p1', 'README.md', WARN), edit('p1', 'docs/usage.md', WARN)];
-  ok('D-b: source + two credential-warning docs → third file denied "file 3 of this request", Level 2', decisionOf(r[0]) === 'none' && decisionOf(r[1]) === 'none' && decisionOf(r[2]) === 'deny' && /file 3 of this request/.test(reasonOf(r[2])) && stateOf(sid).levels.p1.level === 2, r.map(reasonOf).join(' | '));
-  ok('D-b: the sensitive README is recorded in reqSensitive (path only)', (stateOf(sid).reqSensitive?.p1?.[key] || []).map((f) => path.relative(W, f)).join() === 'README.md', JSON.stringify(stateOf(sid).reqSensitive));
+  let r = [edit('p1', 'src/cache.js', 'entry'), edit('p1', 'README.md', WARN)];
+  ok('D-b: source then a credential-warning README → README denied (content floor), request Level 2', decisionOf(r[0]) === 'none' && isContentFloor(r[1]) && stateOf(sid).levels.p1.level === 2, r.map(reasonOf).join(' | '));
+  ok('D-b: audit level line has source floor, floor ["docs-content"], no edit text', (() => { const l = floorLines('p1'); return l.length === 1 && l[0].floor.join() === 'docs-content' && !JSON.stringify(l).includes('credentials'); })(), JSON.stringify(floorLines('p1')));
+  ok('D-b: the denied README is not recorded in reqFiles', !(stateOf(sid).reqFiles?.p1?.[key] || []).some((f) => f.endsWith('README.md')));
+  ok('D-b: after the floor, a later plain edit is denied by the level gate', decisionOf(edit('p1', 'src/b.js')) === 'deny');
   ok('state never stores edit content', !JSON.stringify(stateOf(sid)).includes('credentials'));
 
-  // D-c: Write with an env-var key, after two source files.
+  // D-c: a single docs Write with an env-var key, no other file.
   check('p2');
-  r = [edit('p2', 'src/a.js'), edit('p2', 'src/b.js'), write('p2', 'docs/setup.md', '# Setup\nSet CACHE_API_KEY from the admin console.')];
-  ok('D-c: two source files then a docs Write with CACHE_API_KEY → denied as file 3', decisionOf(r[2]) === 'deny' && /file 3 of this request/.test(reasonOf(r[2])), reasonOf(r[2]));
+  r = write('p2', 'docs/setup.md', '# Setup\nSet CACHE_API_KEY from the admin console.');
+  ok('D-c: a lone docs Write with CACHE_API_KEY → content floor (one file is enough)', isContentFloor(r), reasonOf(r));
+
+  // The 2-file case D36 closes: one source file plus a credential README.
+  check('p2b');
+  r = [edit('p2b', 'src/cache.js', 'entry'), edit('p2b', 'README.md', WARN)];
+  ok('2-file job: src/cache.js then a README with a credential line → README denied (content floor), Level 2', decisionOf(r[0]) === 'none' && isContentFloor(r[1]) && stateOf(sid).levels.p2b.level === 2, r.map(reasonOf).join(' | '));
+  check('p2c');
+  r = edit('p2c', 'docs/config.md', 'Set `clientSecret` in config.');
+  ok('camelCase: docs edit naming clientSecret → content floor', isContentFloor(r), reasonOf(r));
+  check('p2d');
+  r = edit('p2d', 'README.md', 'Each agent has a token budget.');
+  ok('false-positive guard: "token budget" in a doc → no decision', decisionOf(r) === 'none', reasonOf(r));
 
   // D-a still passes: plain docs don't count.
   check('p3');
   r = [edit('p3', 'src/cache.js', 'entry'), edit('p3', 'README.md', 'Entries expire after the TTL.'), edit('p3', 'docs/usage.md', 'Entries expire after the TTL.')];
   ok('D-a: source + two plain docs → no decision (v0.2.3 relief kept)', r.every((x) => decisionOf(x) === 'none'), r.map(reasonOf).join(' | '));
-
-  // Docs-only jobs: sensitive docs count like any file.
   check('p4');
-  r = [edit('p4', 'docs/1.md', WARN), edit('p4', 'docs/2.md', 'plain'), edit('p4', 'docs/3.md', 'plain'), edit('p4', 'docs/4.md', WARN), edit('p4', 'docs/5.md', WARN)];
-  ok('docs-only: one sensitive + plain docs + a second sensitive → no decision (2 counted)', r.slice(0, 4).every((x) => decisionOf(x) === 'none'), r.map(reasonOf).join(' | '));
-  ok('docs-only: a third sensitive docs file → denied', decisionOf(r[4]) === 'deny' && /file 3 of this request/.test(reasonOf(r[4])), reasonOf(r[4]));
+  ok('docs-only: five plain docs → no decision', ['docs/1.md', 'docs/2.md', 'docs/3.md', 'README.md', 'CHANGELOG.md'].every((f) => decisionOf(edit('p4', f, 'plain text')) === 'none'));
 
-  // A docs file first edited plainly, then with sensitive content, starts counting on the second edit.
+  // A docs file first edited plainly, then with sensitive content: the second edit triggers.
   check('p5');
-  r = [edit('p5', 'src/a.js'), edit('p5', 'src/b.js'), edit('p5', 'README.md', 'plain'), edit('p5', 'README.md', WARN)];
-  ok('re-edit: README plain (exempt) then with a credential line → the second edit is denied as file 3', decisionOf(r[2]) === 'none' && decisionOf(r[3]) === 'deny' && /file 3 of this request/.test(reasonOf(r[3])), r.map(reasonOf).join(' | '));
-  check('p6');
-  r = [edit('p6', 'src/a.js'), edit('p6', 'README.md', WARN), edit('p6', 'README.md', WARN), edit('p6', 'README.md', 'plain')];
-  ok('re-edit: an already-counted sensitive README re-edited → no decision (still 2 files)', r.every((x) => decisionOf(x) === 'none'), r.map(reasonOf).join(' | '));
+  r = [edit('p5', 'README.md', 'plain'), edit('p5', 'README.md', WARN)];
+  ok('re-edit: README plain then with a credential line → the second edit is denied (content floor)', decisionOf(r[0]) === 'none' && isContentFloor(r[1]), r.map(reasonOf).join(' | '));
 
-  // Unchanged: a source file's content isn't scanned; non-docs keep counting regardless.
+  // Removing a credential warning also triggers (old_string scanned).
+  check('p6');
+  r = edit('p6', 'README.md', '', 'Never log passwords.');
+  ok('removing a credential line from a doc → content floor', isContentFloor(r), reasonOf(r));
+
+  // Unchanged: source and prompt files aren't content-scanned.
   check('p7');
   r = [edit('p7', 'src/a.js', 'const password = x;'), edit('p7', 'src/b.js')];
   ok('source files: sensitive content in two source files → no decision (content only matters for docs)', r.every((x) => decisionOf(x) === 'none'), r.map(reasonOf).join(' | '));
+  check('p8');
+  r = edit('p8', 'plugin/skills/x/SKILL.md', 'mentions an API key');
+  ok('prompt files (SKILL.md) are not docs-only → not content-floored, counted as before', decisionOf(r) === 'none', reasonOf(r));
+
 }
 
 console.log(out.join('\n'));
