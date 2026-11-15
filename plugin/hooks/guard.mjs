@@ -359,6 +359,20 @@ export function docsOnlyPath(relPath) {
   } catch { return false; }
 }
 
+// v0.2.4 (D36): a docs-only file whose edit carries auth, secret, credential or infra content still counts toward the
+// floor, as every file did in v0.2.2. D35 left that trigger to the model's level-check answers, and live runs answered
+// no 4/4 (reports/release-checklist-v0.2.3-2026-11-15.md). Scans only the edit's own text (old and new), never stores it.
+// Word edges treat `_` as a separator so env-var names like CACHE_API_KEY match; `author` and `tokenizer` don't.
+const SENSITIVE_DOC = /(?<![a-z0-9])(?:auth(?:n|z|enticat[a-z]*|ori[sz][a-z]*)?|oauth2?|oidc|saml|sso|jwt|bearer|tokens?|api[\s_-]?keys?|access[\s_-]?keys?|secrets?|passwords?|passwd|passphrases?|credentials?|private[\s_-]?keys?|ssh|kubeconfig|terraform|kubernetes|k8s|helm|ansible|iam|rbac|ci\/cd|github[\s_-]?actions|infrastructure|iac)(?![a-z0-9])/i;
+export function sensitiveDocContent(input) {
+  try {
+    if (!input || typeof input !== 'object') return false;
+    const parts = [input.content, input.new_string, input.old_string, input.new_source];
+    if (Array.isArray(input.edits)) for (const e of input.edits) if (e && typeof e === 'object') parts.push(e.old_string, e.new_string);
+    return parts.some((t) => typeof t === 'string' && SENSITIVE_DOC.test(t));
+  } catch { return true; } // fail closed: count the file
+}
+
 // ---------------------------------------------------------------------------------------------
 // v0.2.2 (D34): the level check
 
@@ -601,7 +615,7 @@ export function decide(payload, state = null, env = process.env) {
   });
 
   // v0.2.2 (D34): the level gate for one main-thread edit inside the cwd's repo.
-  const levelGate = (pid, abs, rid) => {
+  const levelGate = (pid, abs, rid, sensitive = false) => {
     const repo = rid.key;
     const chk = session.levels && session.levels[pid];
     if (!chk || typeof chk.level !== 'number') {
@@ -617,18 +631,25 @@ export function decide(payload, state = null, env = process.env) {
     }
     const byRepo = session.reqFiles && session.reqFiles[pid] && typeof session.reqFiles[pid] === 'object' ? session.reqFiles[pid] : {};
     const files = Array.isArray(byRepo[repo]) ? byRepo[repo] : [];
-    if (files.some((f) => samePath(f, abs))) return; // already edited in this request
-    const rel = isUnder(abs, rid.top) ? path.relative(rid.top, abs) : abs;
+    const byRepoS = session.reqSensitive && session.reqSensitive[pid] && typeof session.reqSensitive[pid] === 'object' ? session.reqSensitive[pid] : {};
+    const flagged = Array.isArray(byRepoS[repo]) ? byRepoS[repo] : [];
+    const relOf = (f) => (isUnder(f, rid.top) ? path.relative(rid.top, f) : f);
+    const rel = relOf(abs);
+    // v0.2.4 (D36): a docs-only file is exempt from the floor only while none of its edits in this request was sensitive.
+    const exempt = (f) => docsOnlyPath(relOf(f)) && !flagged.some((g) => samePath(g, f));
+    const nowFlagged = sensitive && docsOnlyPath(rel) && !flagged.some((g) => samePath(g, abs));
+    const already = files.some((f) => samePath(f, abs));
+    if (already && !nowFlagged) return; // already edited in this request, and its count doesn't change
     const kinds = riskyKinds(rel);
     // v0.2.3 (D35, P7): docs-only files are recorded in reqFiles but don't count toward the floor of more than 2.
-    const counted = files.filter((f) => !docsOnlyPath(isUnder(f, rid.top) ? path.relative(rid.top, f) : f)).length;
+    const counted = files.filter((f) => !samePath(f, abs) && !exempt(f)).length;
     let floor = null;
     let reason = null;
     if (kinds.length) {
       const keys = [...new Set(kinds.map((k) => RISKY_KEY[k]))];
       floor = kinds;
       reason = `agent-org guard: ${kinds.map((k) => RISKY_LABELS[k]).join(' and ')} path, which the level check answered no (${keys.join(', ')}). That's a Level 2 trigger, so this request is now Level 2: load the agent-org:deliver skill; nothing is implemented without an approved intent.`;
-    } else if (!docsOnlyPath(rel) && counted + 1 > 2) {
+    } else if ((!docsOnlyPath(rel) || sensitive) && counted + 1 > 2) {
       floor = ['files'];
       reason = `agent-org guard: this would be file ${counted + 1} of this request, and more than 2 files is Level 2 (D5). This request is now Level 2: load the agent-org:deliver skill; nothing is implemented without an approved intent.`;
     }
@@ -638,7 +659,8 @@ export function decide(payload, state = null, env = process.env) {
       effects.push({ kind: 'audit', repo: rid, rec: { event: 'level', level: 2, source: 'floor', prompt: pid, floor } });
       return;
     }
-    effects.push({ kind: 'reqfile', promptId: pid, repo, file: abs });
+    if (!already) effects.push({ kind: 'reqfile', promptId: pid, repo, file: abs });
+    if (nowFlagged) effects.push({ kind: 'reqsensitive', promptId: pid, repo, file: abs });
   };
 
   // v0.2: scope growth (main thread only).
@@ -658,7 +680,7 @@ export function decide(payload, state = null, env = process.env) {
     const inCwdRepo = cwdId && rid.top && samePath(rid.top, cwdId.top)
       && (isUnder(abs, cwdId.top) || isUnder(realpathLoose(abs), realpathLoose(cwdId.top)));
     if (pid && inCwdRepo) {
-      levelGate(pid, abs, rid);
+      levelGate(pid, abs, rid, sensitiveDocContent(input));
       return;
     }
     const seen = Array.isArray(session.scope[repo]) ? session.scope[repo] : [];
@@ -720,6 +742,15 @@ function applyEffects(payload, effects) {
           if (!list.includes(e.file)) list.push(e.file);
           byRepo[e.repo] = list;
           s.reqFiles[e.promptId] = byRepo;
+          return s;
+        });
+      } else if (e.kind === 'reqsensitive') {
+        updateState(payload.session_id, (s) => {
+          const byRepo = s.reqSensitive[e.promptId] && typeof s.reqSensitive[e.promptId] === 'object' ? s.reqSensitive[e.promptId] : {};
+          const list = Array.isArray(byRepo[e.repo]) ? byRepo[e.repo] : [];
+          if (!list.includes(e.file)) list.push(e.file);
+          byRepo[e.repo] = list;
+          s.reqSensitive[e.promptId] = byRepo;
           return s;
         });
       }

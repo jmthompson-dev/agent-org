@@ -76,7 +76,7 @@ Hooks append to `~/.agent-org/audit/<repo key>.jsonl` (v0.2.0 logs named by the 
 **In the working directory's repo (v0.2.2):** without an approval recorded in this session for the repo, a main-thread edit is **denied** in any of these cases:
 - the request has no level check;
 - the check maps to Level 2+;
-- the edit would be the request's third file (v0.2.3: docs-only paths aren't counted toward this floor: `.md`, `.mdx`, `.rst` or `.txt` files (other files in `docs/` still count), with no risky kind; prompt files such as `SKILL.md`, `CLAUDE.md`, `.md` under `agents/`, `skills/`, `commands/`, `hooks/`, `.claude/`, and `requirements*.txt`, `constraints*.txt`, `CMakeLists.txt` still count);
+- the edit would be the request's third file (v0.2.3: docs-only paths aren't counted toward this floor: `.md`, `.mdx`, `.rst` or `.txt` files (other files in `docs/` still count), with no risky kind; prompt files such as `SKILL.md`, `CLAUDE.md`, `.md` under `agents/`, `skills/`, `commands/`, `hooks/`, `.claude/`, and `requirements*.txt`, `constraints*.txt`, `CMakeLists.txt` still count; v0.2.4: a docs-only file counts again once any of its edits in the request has auth, secret, credential or infra terms in the old or new text, e.g. `token`, `API key`, `password`, `OAuth`, `Terraform`, `CI/CD`);
 - the edit touches a risky path (migration, CI, IaC/k8s/helm, auth).
 
 The last two raise the request to Level 2 (a `level` event with source `floor`). Files are counted per request (`prompt_id`). Errors fail open.
